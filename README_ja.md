@@ -134,10 +134,14 @@ picosystem_hyperspace/
     └── ...
 ```
 
+## 関連プロジェクト
+
+- [Hyperspace SDL2](https://github.com/itsmeterada/hyperspace) - デスクトッププラットフォーム向けSDL2移植版（Windows、macOS、Linux）
+
 ## クレジット
 
 - **オリジナルゲーム**: [Hyperspace](https://www.lexaloffle.com/bbs/?tid=41663) by J-Fry (PICO-8)
-- **SDL2移植**: itsmeterada
+- **SDL2移植**: [itsmeterada](https://github.com/itsmeterada/hyperspace)
 - **PicoSystem移植**: itsmeterada
 - **libfixmath**: [PetteriAimworthy/libfixmath](https://github.com/PetteriAimworthy/libfixmath)
 

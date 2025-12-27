@@ -134,10 +134,14 @@ picosystem_hyperspace/
     └── ...
 ```
 
+## Related Projects
+
+- [Hyperspace SDL2](https://github.com/itsmeterada/hyperspace) - SDL2 port for desktop platforms (Windows, macOS, Linux)
+
 ## Credits
 
 - **Original Game**: [Hyperspace](https://www.lexaloffle.com/bbs/?tid=41663) by J-Fry (PICO-8)
-- **SDL2 Port**: itsmeterada
+- **SDL2 Port**: [itsmeterada](https://github.com/itsmeterada/hyperspace)
 - **PicoSystem Port**: itsmeterada
 - **libfixmath**: [PetteriAimworthy/libfixmath](https://github.com/PetteriAimworthy/libfixmath)
 
