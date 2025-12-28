@@ -550,7 +550,7 @@ static Vec3 interp_tgt_pos;
 static fix16_t aim_life_ratio = F16(-1.0);
 static fix16_t cur_thrust = 0;
 static fix16_t fade_ratio = F16(-1.0);
-static int manual_fire = 0;
+static int manual_fire = 1;  // Default to MANUAL mode (AUTO off)
 static int non_inverted_y = 0;
 static fix16_t cur_laser_t = 0;
 static int cur_laser_side = -1;
@@ -637,26 +637,29 @@ static void mat_rotx(Mat34* m, fix16_t a) {
     fix16_t angle = fix16_mul(a, FIX_TWO_PI);
     fix16_t cos_a = fix16_cos(angle);
     fix16_t sin_a = fix16_sin(angle);
+    // PICO-8's sin is negative of standard sin, so we negate sin_a
     m->m[0] = fix16_one; m->m[1] = 0; m->m[2] = 0; m->m[3] = 0;
-    m->m[4] = 0; m->m[5] = cos_a; m->m[6] = sin_a; m->m[7] = 0;
-    m->m[8] = 0; m->m[9] = -sin_a; m->m[10] = cos_a; m->m[11] = 0;
+    m->m[4] = 0; m->m[5] = cos_a; m->m[6] = -sin_a; m->m[7] = 0;
+    m->m[8] = 0; m->m[9] = sin_a; m->m[10] = cos_a; m->m[11] = 0;
 }
 
 static void mat_roty(Mat34* m, fix16_t a) {
     fix16_t angle = fix16_mul(a, FIX_TWO_PI);
     fix16_t cos_a = fix16_cos(angle);
     fix16_t sin_a = fix16_sin(angle);
-    m->m[0] = cos_a; m->m[1] = 0; m->m[2] = sin_a; m->m[3] = 0;
+    // PICO-8's sin is negative of standard sin, so we negate sin_a
+    m->m[0] = cos_a; m->m[1] = 0; m->m[2] = -sin_a; m->m[3] = 0;
     m->m[4] = 0; m->m[5] = fix16_one; m->m[6] = 0; m->m[7] = 0;
-    m->m[8] = -sin_a; m->m[9] = 0; m->m[10] = cos_a; m->m[11] = 0;
+    m->m[8] = sin_a; m->m[9] = 0; m->m[10] = cos_a; m->m[11] = 0;
 }
 
 static void mat_rotz(Mat34* m, fix16_t a) {
     fix16_t angle = fix16_mul(a, FIX_TWO_PI);
     fix16_t cos_a = fix16_cos(angle);
     fix16_t sin_a = fix16_sin(angle);
-    m->m[0] = cos_a; m->m[1] = sin_a; m->m[2] = 0; m->m[3] = 0;
-    m->m[4] = -sin_a; m->m[5] = cos_a; m->m[6] = 0; m->m[7] = 0;
+    // PICO-8's sin is negative of standard sin, so we negate sin_a
+    m->m[0] = cos_a; m->m[1] = -sin_a; m->m[2] = 0; m->m[3] = 0;
+    m->m[4] = sin_a; m->m[5] = cos_a; m->m[6] = 0; m->m[7] = 0;
     m->m[8] = 0; m->m[9] = 0; m->m[10] = fix16_one; m->m[11] = 0;
 }
 
@@ -1023,7 +1026,8 @@ static void init_single_bg(Background* bg, fix16_t z) {
     fix16_t a = rnd_fix(fix16_one);
     fix16_t r = F16(150.0) + rnd_fix(F16(150.0));
     fix16_t angle = fix16_mul(a, FIX_TWO_PI);
-    vec3_set(&bg->pos, fix16_mul(r, fix16_cos(angle)), fix16_mul(r, fix16_sin(angle)), z);
+    // PICO-8's sin is negative of standard sin
+    vec3_set(&bg->pos, fix16_mul(r, fix16_cos(angle)), fix16_mul(r, -fix16_sin(angle)), z);
     bg->spd = F16(0.05) + rnd_fix(F16(0.05));
     if (flr_fix(rnd_fix(F16(6.0))) == 0) {
         bg->index = 8 + (int)rnd_fix(F16(8.0));
@@ -1970,7 +1974,7 @@ static void game_draw(void) {
         print_3d("HYPERSPACE", 1, 1);
         print_3d("PicoSystem Port", 1, 8);
         if (cur_mode == 0) {
-            print_3d("PRESS X", 30, 95);
+            print_3d("PRESS X TO START", 30, 95);
             if (score > 0) {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "LAST %d", score);
@@ -1980,7 +1984,7 @@ static void game_draw(void) {
             snprintf(buf, sizeof(buf), "BEST %d", best_score);
             print_3d(buf, 1, 112);
         } else {
-            print_3d("PRESS X", 30, 50);
+            print_3d("PRESS X TO START", 30, 50);
             print_3d("ARROWS:OPT", 30, 60);
             const char* option_str[] = {"AUTO", "MANUAL", "INV Y", "NORM Y"};
             spr(99, 1, 105, 1, 2);
@@ -2028,8 +2032,9 @@ static void update_input(void) {
     btn_state[1] = !(io & (1 << PICOSYSTEM_INPUT_RIGHT));  // Right
     btn_state[2] = !(io & (1 << PICOSYSTEM_INPUT_UP));     // Up
     btn_state[3] = !(io & (1 << PICOSYSTEM_INPUT_DOWN));   // Down
-    btn_state[4] = !(io & (1 << PICOSYSTEM_INPUT_A));      // A = O (fire)
-    btn_state[5] = !(io & (1 << PICOSYSTEM_INPUT_X));      // X = X (action/barrel roll)
+    // A and B both fire, X and Y both do barrel roll
+    btn_state[4] = !(io & (1 << PICOSYSTEM_INPUT_A)) || !(io & (1 << PICOSYSTEM_INPUT_B));  // A/B = fire
+    btn_state[5] = !(io & (1 << PICOSYSTEM_INPUT_X)) || !(io & (1 << PICOSYSTEM_INPUT_Y));  // X/Y = barrel roll
 }
 
 // ============================================================================
