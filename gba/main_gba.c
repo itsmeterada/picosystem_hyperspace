@@ -610,9 +610,21 @@ static void transform_pos(Vec3* proj, const Mat34* mat, const Vec3* pos) {
 // ARM mode for faster execution (Thumb is slower for math-heavy code)
 __attribute__((target("arm")))
 static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16_t* uv1, fix16_t* uv2, fix16_t light) {
-    // v0 is top vertex, v1 and v2 are bottom vertices at same y
-    fix16_t y_top = v0->y, y_bot = v1->y;
-    if (y_top == y_bot) return;
+    // v0 is tip vertex, v1 and v2 are base vertices at same y
+    // Works for both flat-bottom (v0 at top) and flat-top (v0 at bottom) triangles
+    fix16_t y0 = v0->y, y1 = v1->y;
+    if (y0 == y1) return;
+
+    // Determine direction: flat-bottom (y0 < y1) or flat-top (y0 > y1)
+    fix16_t y_top, y_bot;
+    int direction;
+    if (y0 < y1) {
+        y_top = y0; y_bot = y1;
+        direction = 1;  // Top to bottom
+    } else {
+        y_top = y1; y_bot = y0;
+        direction = -1; // Bottom to top (for edge calculation)
+    }
 
     // Determine scanline range
     int y_start = fix16_to_int(y_top + F16(0.5));
@@ -626,28 +638,56 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16
     if (fix16_abs(dy) < F16(0.01)) return;
     fix16_t inv_dy = fix16_div(fix16_one, dy);
 
-    // Left edge gradients (v0 to v1)
-    fix16_t dx_left = fix16_mul(v1->x - v0->x, inv_dy);
-    fix16_t dz_left = fix16_mul(v1->z - v0->z, inv_dy);
-    fix16_t du_left = fix16_mul(uv1[0] - uv0[0], inv_dy);
-    fix16_t dv_left = fix16_mul(uv1[1] - uv0[1], inv_dy);
+    fix16_t dx_left, dz_left, du_left, dv_left;
+    fix16_t dx_right, dz_right, du_right, dv_right;
+    fix16_t x_left, x_right, z_left, z_right, u_left, u_right, v_left_val, v_right_val;
+    fix16_t prestep;
 
-    // Right edge gradients (v0 to v2)
-    fix16_t dx_right = fix16_mul(v2->x - v0->x, inv_dy);
-    fix16_t dz_right = fix16_mul(v2->z - v0->z, inv_dy);
-    fix16_t du_right = fix16_mul(uv2[0] - uv0[0], inv_dy);
-    fix16_t dv_right = fix16_mul(uv2[1] - uv0[1], inv_dy);
-
-    // Starting values (prestep to first scanline)
-    fix16_t prestep = fix16_from_int(y_start) + FIX_HALF - y_top;
-    fix16_t x_left = v0->x + fix16_mul(prestep, dx_left);
-    fix16_t x_right = v0->x + fix16_mul(prestep, dx_right);
-    fix16_t z_left = v0->z + fix16_mul(prestep, dz_left);
-    fix16_t z_right = v0->z + fix16_mul(prestep, dz_right);
-    fix16_t u_left = uv0[0] + fix16_mul(prestep, du_left);
-    fix16_t u_right = uv0[0] + fix16_mul(prestep, du_right);
-    fix16_t v_left = uv0[1] + fix16_mul(prestep, dv_left);
-    fix16_t v_right = uv0[1] + fix16_mul(prestep, dv_right);
+    if (direction > 0) {
+        // Flat-bottom: v0 at top, v1/v2 at bottom
+        // Left edge gradients (v0 to v1)
+        dx_left = fix16_mul(v1->x - v0->x, inv_dy);
+        dz_left = fix16_mul(v1->z - v0->z, inv_dy);
+        du_left = fix16_mul(uv1[0] - uv0[0], inv_dy);
+        dv_left = fix16_mul(uv1[1] - uv0[1], inv_dy);
+        // Right edge gradients (v0 to v2)
+        dx_right = fix16_mul(v2->x - v0->x, inv_dy);
+        dz_right = fix16_mul(v2->z - v0->z, inv_dy);
+        du_right = fix16_mul(uv2[0] - uv0[0], inv_dy);
+        dv_right = fix16_mul(uv2[1] - uv0[1], inv_dy);
+        // Starting values (prestep to first scanline from v0)
+        prestep = fix16_from_int(y_start) + FIX_HALF - y_top;
+        x_left = v0->x + fix16_mul(prestep, dx_left);
+        x_right = v0->x + fix16_mul(prestep, dx_right);
+        z_left = v0->z + fix16_mul(prestep, dz_left);
+        z_right = v0->z + fix16_mul(prestep, dz_right);
+        u_left = uv0[0] + fix16_mul(prestep, du_left);
+        u_right = uv0[0] + fix16_mul(prestep, du_right);
+        v_left_val = uv0[1] + fix16_mul(prestep, dv_left);
+        v_right_val = uv0[1] + fix16_mul(prestep, dv_right);
+    } else {
+        // Flat-top: v0 at bottom, v1/v2 at top
+        // Left edge gradients (v1 to v0)
+        dx_left = fix16_mul(v0->x - v1->x, inv_dy);
+        dz_left = fix16_mul(v0->z - v1->z, inv_dy);
+        du_left = fix16_mul(uv0[0] - uv1[0], inv_dy);
+        dv_left = fix16_mul(uv0[1] - uv1[1], inv_dy);
+        // Right edge gradients (v2 to v0)
+        dx_right = fix16_mul(v0->x - v2->x, inv_dy);
+        dz_right = fix16_mul(v0->z - v2->z, inv_dy);
+        du_right = fix16_mul(uv0[0] - uv2[0], inv_dy);
+        dv_right = fix16_mul(uv0[1] - uv2[1], inv_dy);
+        // Starting values (prestep to first scanline from v1/v2)
+        prestep = fix16_from_int(y_start) + FIX_HALF - y_top;
+        x_left = v1->x + fix16_mul(prestep, dx_left);
+        x_right = v2->x + fix16_mul(prestep, dx_right);
+        z_left = v1->z + fix16_mul(prestep, dz_left);
+        z_right = v2->z + fix16_mul(prestep, dz_right);
+        u_left = uv1[0] + fix16_mul(prestep, du_left);
+        u_right = uv2[0] + fix16_mul(prestep, du_right);
+        v_left_val = uv1[1] + fix16_mul(prestep, dv_left);
+        v_right_val = uv2[1] + fix16_mul(prestep, dv_right);
+    }
 
     // Texture info
     int tex_x = cur_tex->x, tex_y = cur_tex->y, tex_lit_x = cur_tex->light_x;
@@ -668,12 +708,12 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16
             if (span > F16(0.5)) {
                 fix16_t inv_span = fix16_div(fix16_one, span);
                 fix16_t du_dx = fix16_mul(u_right - u_left, inv_span);
-                fix16_t dv_dx = fix16_mul(v_right - v_left, inv_span);
+                fix16_t dv_dx = fix16_mul(v_right_val - v_left_val, inv_span);
 
                 // Prestep to first pixel
                 fix16_t x_prestep = fix16_from_int(xl) + FIX_HALF - x_left;
                 fix16_t u = u_left + fix16_mul(x_prestep, du_dx);
-                fix16_t v = v_left + fix16_mul(x_prestep, dv_dx);
+                fix16_t v = v_left_val + fix16_mul(x_prestep, dv_dx);
 
                 // Pixel loop with incremental UV (no division!)
                 int offset_x = tex_x;
@@ -699,8 +739,8 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16
         z_right += dz_right;
         u_left += du_left;
         u_right += du_right;
-        v_left += dv_left;
-        v_right += dv_right;
+        v_left_val += dv_left;
+        v_right_val += dv_right;
     }
 }
 
