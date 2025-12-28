@@ -11,8 +11,15 @@
 #include <stdbool.h>
 
 #include "pico/stdlib.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 #include "picosystem_hardware.h"
 #include "libfixmath/fixmath.h"
+
+// Flash storage for persistent data (use last sector of flash)
+// RP2040 has 2MB flash, sector size is 4KB
+#define FLASH_TARGET_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+#define FLASH_MAGIC 0x48595045  // "HYPE" in hex
 
 extern struct picosystem_hw pshw;
 
@@ -77,8 +84,42 @@ static uint32_t rnd_state = 1;
 static bool btn_state[6] = {false};
 static bool btn_prev[6] = {false};
 
-// Cart data (persistent storage) - simplified for PicoSystem
+// Cart data (persistent storage)
 static int32_t cart_data[64] = {0};
+static bool cart_data_dirty = false;
+
+// Flash storage structure
+typedef struct {
+    uint32_t magic;
+    int32_t data[64];
+} FlashSaveData;
+
+static void load_cart_data(void) {
+    const FlashSaveData* flash_data = (const FlashSaveData*)(XIP_BASE + FLASH_TARGET_OFFSET);
+    if (flash_data->magic == FLASH_MAGIC) {
+        memcpy(cart_data, flash_data->data, sizeof(cart_data));
+    }
+}
+
+static void save_cart_data(void) {
+    if (!cart_data_dirty) return;
+
+    FlashSaveData save_data;
+    save_data.magic = FLASH_MAGIC;
+    memcpy(save_data.data, cart_data, sizeof(cart_data));
+
+    // Pad to 256 bytes (minimum write size)
+    uint8_t buffer[256] __attribute__((aligned(4)));
+    memset(buffer, 0xFF, sizeof(buffer));
+    memcpy(buffer, &save_data, sizeof(save_data));
+
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(FLASH_TARGET_OFFSET, buffer, sizeof(buffer));
+    restore_interrupts(ints);
+
+    cart_data_dirty = false;
+}
 
 // Fixed-point constants
 #define FIX_HALF F16(0.5)
@@ -376,7 +417,10 @@ static int32_t dget(int n) {
 
 static void dset(int n, int32_t v) {
     if (n >= 0 && n < 64) {
-        cart_data[n] = v;
+        if (cart_data[n] != v) {
+            cart_data[n] = v;
+            cart_data_dirty = true;
+        }
     }
 }
 
@@ -1043,6 +1087,9 @@ static void init_bg(void) {
 }
 
 static void init_main(void) {
+    // Save persistent data to flash when returning to title
+    save_cart_data();
+
     cur_mode = 0;
     cam_angle_z = F16(-0.4);
     cam_angle_x = fix16_mul(fix16_from_int(flr_fix(rnd_fix(FIX_TWO)) * 2 - 1), F16(0.03) + rnd_fix(F16(0.1)));
@@ -2044,6 +2091,9 @@ static void update_input(void) {
 static void game_init(void) {
     pal_reset();
     rnd_state = picosystem_time();
+
+    // Load persistent data from flash
+    load_cart_data();
 
     init_main();
     init_ship();

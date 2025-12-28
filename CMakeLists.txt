@@ -48,6 +48,8 @@ function(picosystem_hardware_executable NAME SOURCES)
   target_link_libraries(${NAME} picosystem_hardware)
   # Link to pico_stdlib (gpio, time, etc. functions)
   target_link_libraries(${NAME} pico_stdlib)
+  # Link to hardware_flash and hardware_sync for persistent storage
+  target_link_libraries(${NAME} hardware_flash hardware_sync)
 
   # Enable usb output, disable uart output
   pico_enable_stdio_usb(${NAME} 0)
