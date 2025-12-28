@@ -144,6 +144,9 @@ static void pset(int x, int y, int c) {
     }
 }
 
+// Fast pset - no clipping, no bounds check (for rasterizer inner loop)
+#define PSET_FAST(x, y, c) (screen[(y)][(x)] = (c))
+
 static uint8_t pget(int x, int y) {
     if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
         return screen[y][x];
@@ -157,6 +160,9 @@ static uint8_t sget(int x, int y) {
     }
     return 0;
 }
+
+// Fast texture fetch - no bounds checking (caller must ensure valid coords)
+#define SGET_FAST(x, y) (spritesheet[(y)][(x)])
 
 static void line(int x0, int y0, int x1, int y1, int c) {
     int dx = abs(x1 - x0);
@@ -195,7 +201,7 @@ static void circfill(int cx, int cy, int r, int c) {
 }
 
 static void spr(int n, int x, int y, int w, int h) {
-    int sx = (n % 16) * 8;
+    int sx = (n & 15) * 8;  // bitmask instead of modulo
     int sy = (n / 16) * 8;
     for (int py = 0; py < h * 8; py++) {
         for (int px = 0; px < w * 8; px++) {
@@ -920,10 +926,24 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2,
         fix16_t x1y = fix16_mul(x1, y);
         fix16_t x2y = fix16_mul(x2, y);
 
+        // Pre-compute scanline gradients (avoid division in inner loop)
+        fix16_t inv_d = fix16_div(fix16_one, d);
+        fix16_t db0_dx = fix16_mul(y1 - y2, inv_d);
+        fix16_t db1_dx = fix16_mul(y2 - y0, inv_d);
+
+        fix16_t b0_base = fix16_mul(cb0 + fix16_mul(xfirst, y1) + x2y - fix16_mul(xfirst, y2) - x1y, inv_d);
+        fix16_t b1_base = fix16_mul(cb1 + fix16_mul(xfirst, y2) + x0y - fix16_mul(xfirst, y0) - x2y, inv_d);
+
+        int py = fix16_to_int(y);
+        int dither_row = 56 + (py & 7);  // bitmask instead of modulo
+
         for (fix16_t x = xfirst; x <= xlast; x += fix16_one) {
-            fix16_t b0 = fix16_div(cb0 + fix16_mul(x, y1) + x2y - fix16_mul(x, y2) - x1y, d);
-            fix16_t b1 = fix16_div(cb1 + fix16_mul(x, y2) + x0y - fix16_mul(x, y0) - x2y, d);
+            fix16_t b0 = b0_base;
+            fix16_t b1 = b1_base;
             fix16_t b2 = fix16_one - b0 - b1;
+
+            b0_base += db0_dx;
+            b1_base += db1_dx;
 
             b0 = fix16_mul(b0, z0);
             b1 = fix16_mul(b1, z1);
@@ -932,18 +952,18 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2,
             fix16_t d2 = b0 + b1 + b2;
             if (fix16_abs(d2) < F16(0.001)) continue;
 
-            fix16_t uvx = fix16_div(fix16_mul(b0, uv0x) + fix16_mul(b1, uv1x) + fix16_mul(b2, uv2x), d2);
-            fix16_t uvy = fix16_div(fix16_mul(b0, uv0y) + fix16_mul(b1, uv1y) + fix16_mul(b2, uv2y), d2);
+            fix16_t inv_d2 = fix16_div(fix16_one, d2);
+            fix16_t uvx = fix16_mul(fix16_mul(b0, uv0x) + fix16_mul(b1, uv1x) + fix16_mul(b2, uv2x), inv_d2);
+            fix16_t uvy = fix16_mul(fix16_mul(b0, uv0y) + fix16_mul(b1, uv1y) + fix16_mul(b2, uv2y), inv_d2);
 
-            int offset_x = tex_x;
             int px = fix16_to_int(x);
-            int py = fix16_to_int(y);
-            int dither_val = sget(px % 8, 56 + py % 8);
+            int offset_x = tex_x;
+            int dither_val = SGET_FAST(px & 7, dither_row);  // bitmask instead of modulo
             if (light <= F16(7.0) + fix16_mul(fix16_from_int(dither_val), F16(0.125))) {
                 offset_x += tex_lit_x;
             }
 
-            pset(px, py, sget(fix16_to_int(uvx) + offset_x, fix16_to_int(uvy) + tex_y));
+            PSET_FAST(px, py, SGET_FAST(fix16_to_int(uvx) + offset_x, fix16_to_int(uvy) + tex_y));
         }
     }
 }
@@ -958,9 +978,21 @@ static void rasterize_tri(int index, Triangle* tris, Vec3* projs) {
     Vec3* v1 = &projs[tri->tri[1]];
     Vec3* v2 = &projs[tri->tri[2]];
 
+    // Early cull: all vertices behind camera
+    if (v0->z <= 0 && v1->z <= 0 && v2->z <= 0) return;
+
     fix16_t x0 = v0->x, y0 = v0->y;
     fix16_t x1 = v1->x, y1 = v1->y;
     fix16_t x2 = v2->x, y2 = v2->y;
+
+    // Early cull: completely off-screen
+    fix16_t min_x = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+    fix16_t max_x = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+    fix16_t min_y = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    fix16_t max_y = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+
+    if (max_x < 0 || min_x >= F16(SCREEN_WIDTH)) return;
+    if (max_y < 0 || min_y >= F16(SCREEN_HEIGHT)) return;
 
     // Backface cull
     fix16_t nz = fix16_mul(x1 - x0, y2 - y0) - fix16_mul(y1 - y0, x2 - x0);
@@ -1008,20 +1040,23 @@ static void rasterize_tri(int index, Triangle* tris, Vec3* projs) {
     }
 }
 
-static int tri_compare(const void* a, const void* b) {
-    const Triangle* ta = (const Triangle*)a;
-    const Triangle* tb = (const Triangle*)b;
-    if (ta->z < tb->z) return -1;
-    if (ta->z > tb->z) return 1;
-    return 0;
-}
-
+// Insertion sort - faster than qsort for small arrays (typical mesh has <20 tris)
 static void sort_tris(Triangle* tris, int num, Vec3* projs) {
+    // First pass: compute z for each triangle
     for (int i = 0; i < num; i++) {
         Triangle* tri = &tris[i];
         tri->z = projs[tri->tri[0]].z + projs[tri->tri[1]].z + projs[tri->tri[2]].z;
     }
-    qsort(tris, num, sizeof(Triangle), tri_compare);
+    // Insertion sort by z (ascending = back to front)
+    for (int i = 1; i < num; i++) {
+        Triangle temp = tris[i];
+        int j = i - 1;
+        while (j >= 0 && tris[j].z > temp.z) {
+            tris[j + 1] = tris[j];
+            j--;
+        }
+        tris[j + 1] = temp;
+    }
 }
 
 // ============================================================================
@@ -1839,8 +1874,8 @@ static void set_ngn_pal(void) {
 
     int index = fix16_to_int(ngn_laser_col_idx);
     pal(8, laser_ngn_colors[index]);
-    pal(14, laser_ngn_colors[(index + 1) % 4]);
-    pal(15, laser_ngn_colors[(index + 2) % 4]);
+    pal(14, laser_ngn_colors[(index + 1) & 3]);
+    pal(15, laser_ngn_colors[(index + 2) & 3]);
 }
 
 static void draw_lens_flare(void) {
@@ -1922,7 +1957,7 @@ static void game_draw(void) {
                 if (nme->life < 0) {
                     fix16_t ratio = FIX_HALF + fix16_div(F16(15.0) + fix16_from_int(nme->life), F16(30.0));
                     fix16_t size = fix16_mul(fix16_mul(ratio, nme_radius[nme->type - 1]), F16(0.8));
-                    if ((-nme->life) % 2 == 0) cur_tex = &nme_tex_hit;
+                    if (((-nme->life) & 1) == 0) cur_tex = &nme_tex_hit;
                     for (int j = 0; j < 3; j++) {
                         int idx = get_random_idx(mesh->num_vertices);
                         draw_explosion(&nme->proj[idx], size);
@@ -1930,7 +1965,7 @@ static void game_draw(void) {
                 } else {
                     fix16_t ratio = FIX_HALF + fix16_div(F16(6.0) - fix16_from_int(nme->hit_t), F16(12.0));
                     fix16_t size = fix16_mul(ratio, F16(3.0));
-                    if (nme->hit_t % 2 == 0) cur_tex = &nme_tex_hit;
+                    if ((nme->hit_t & 1) == 0) cur_tex = &nme_tex_hit;
                     transform_pos(&p0, &cam_mat, &nme->hit_pos);
                     draw_explosion(&p0, size);
                 }
@@ -1983,7 +2018,7 @@ static void game_draw(void) {
         transform_pos(&p0, &cam_mat, &hit_pos);
         draw_explosion(&p0, F16(3.0));
 
-        if (hit_t % 2 == 0) {
+        if ((hit_t & 1) == 0) {
             pal(0, 2);
             pal(1, 8);
             pal(6, 14);

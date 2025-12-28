@@ -78,6 +78,18 @@ make -j$(nproc)
 5. **テクスチャマッピング**: 透視補正付きUV座標
 6. **ライティング**: 滑らかなグラデーションのためのディザリング付き三角形単位ライティング
 
+### 最適化
+
+PicoSystem版とGBA版で共通の最適化:
+
+| 最適化 | 説明 |
+|--------|------|
+| 挿入ソート | 小さな三角形配列（20要素未満）ではqsortより高速 |
+| スキャンライン勾配 | ピクセル毎の除算を避けるため重心勾配を事前計算 |
+| 高速マクロ | `SGET_FAST`/`PSET_FAST`で内部ループの境界チェックを省略 |
+| ビットマスク剰余 | `% 2^n`を`& (2^n-1)`に置換（2のべき乗の除数用） |
+| 早期カリング | カメラ背後または画面外の三角形をスキップ |
+
 ### メモリレイアウト
 
 | セクション | サイズ | 説明 |
@@ -127,12 +139,28 @@ picosystem_hyperspace/
 │   ├── picosystem_hardware.c
 │   ├── picosystem_hardware.h
 │   └── ...
-└── libfixmath/            # 固定小数点数学ライブラリ
-    ├── fix16.c
-    ├── fix16.h
-    ├── fix16_trig.c
-    └── ...
+├── libfixmath/            # 固定小数点数学ライブラリ
+│   ├── fix16.c
+│   ├── fix16.h
+│   ├── fix16_trig.c
+│   └── ...
+└── gba/                   # ゲームボーイアドバンス版
+    ├── main_gba.c         # GBA固有の実装
+    ├── raster_arm.s       # 手書きARMアセンブリ
+    ├── Makefile           # devkitARMビルド
+    └── README.md          # GBA版ドキュメント
 ```
+
+## GBA版
+
+`gba/`ディレクトリにゲームボーイアドバンス版もあります。詳細は[gba/README.md](gba/README.md)を参照してください。
+
+PicoSystem版との主な違い:
+- Mode 5ビットマップ（160x128、15ビットカラー）
+- BG2アフィン変換でフルスクリーン（240x160）に拡大
+- 内部ループ用の手書きARMアセンブリ
+- DMAによる高速画面クリア
+- SRAMによるハイスコア保存
 
 ## 関連プロジェクト
 
@@ -143,6 +171,7 @@ picosystem_hyperspace/
 - **オリジナルゲーム**: [Hyperspace](https://www.lexaloffle.com/bbs/?tid=41663) by J-Fry (PICO-8)
 - **SDL2移植**: [itsmeterada](https://github.com/itsmeterada/hyperspace)
 - **PicoSystem移植**: itsmeterada
+- **GBA移植**: itsmeterada
 - **libfixmath**: [PetteriAimworthy/libfixmath](https://github.com/PetteriAimworthy/libfixmath)
 
 ## ライセンス

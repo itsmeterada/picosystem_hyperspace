@@ -78,6 +78,18 @@ The `FIXMATH_NO_OVERFLOW` flag is enabled for better performance, as overflow ch
 5. **Texture Mapping**: UV coordinates with perspective correction
 6. **Lighting**: Per-triangle lighting with dithering for smooth gradients
 
+### Optimizations
+
+Several optimizations are shared between the PicoSystem and GBA ports:
+
+| Optimization | Description |
+|--------------|-------------|
+| Insertion Sort | Faster than qsort for small triangle arrays (<20 elements) |
+| Scanline Gradients | Pre-compute barycentric gradients to avoid per-pixel division |
+| Fast Macros | `SGET_FAST`/`PSET_FAST` bypass bounds checking in inner loops |
+| Bitmask Modulo | Replace `% 2^n` with `& (2^n-1)` for power-of-2 divisors |
+| Early Culling | Skip triangles behind camera or completely off-screen |
+
 ### Memory Layout
 
 | Section | Size | Description |
@@ -127,12 +139,28 @@ picosystem_hyperspace/
 │   ├── picosystem_hardware.c
 │   ├── picosystem_hardware.h
 │   └── ...
-└── libfixmath/            # Fixed-point math library
-    ├── fix16.c
-    ├── fix16.h
-    ├── fix16_trig.c
-    └── ...
+├── libfixmath/            # Fixed-point math library
+│   ├── fix16.c
+│   ├── fix16.h
+│   ├── fix16_trig.c
+│   └── ...
+└── gba/                   # Game Boy Advance port
+    ├── main_gba.c         # GBA-specific implementation
+    ├── raster_arm.s       # Hand-tuned ARM assembly
+    ├── Makefile           # devkitARM build
+    └── README.md          # GBA port documentation
 ```
+
+## GBA Port
+
+A Game Boy Advance port is also available in the `gba/` directory. See [gba/README.md](gba/README.md) for details.
+
+Key differences from PicoSystem version:
+- Mode 5 bitmap (160x128, 15-bit color)
+- BG2 affine scaling to fullscreen (240x160)
+- Hand-tuned ARM assembly for inner loops
+- DMA-accelerated screen clearing
+- SRAM for high score persistence
 
 ## Related Projects
 
@@ -143,6 +171,7 @@ picosystem_hyperspace/
 - **Original Game**: [Hyperspace](https://www.lexaloffle.com/bbs/?tid=41663) by J-Fry (PICO-8)
 - **SDL2 Port**: [itsmeterada](https://github.com/itsmeterada/hyperspace)
 - **PicoSystem Port**: itsmeterada
+- **GBA Port**: itsmeterada
 - **libfixmath**: [PetteriAimworthy/libfixmath](https://github.com/PetteriAimworthy/libfixmath)
 
 ## License
