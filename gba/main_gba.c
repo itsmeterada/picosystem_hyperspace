@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+// Include sprite data early (needed for SGET_FAST macro)
+#include "../hyperspace_data.h"
+
 // GBA hardware definitions
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -22,10 +25,21 @@ typedef unsigned long long u64;
 
 // Place large data in EWRAM (256KB) instead of IWRAM (32KB)
 #define EWRAM_DATA __attribute__((section(".ewram")))
+// Place hot code/data in IWRAM (32KB, fast)
+#define IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#define IWRAM_DATA __attribute__((section(".iwram")))
 
 #define REG_DISPCNT     (*(volatile u16*)0x04000000)
 #define REG_KEYINPUT    (*(volatile u16*)0x04000130)
 #define REG_VCOUNT      (*(volatile u16*)0x04000006)
+
+// DMA registers
+#define REG_DMA3SAD     (*(volatile u32*)0x040000D4)
+#define REG_DMA3DAD     (*(volatile u32*)0x040000D8)
+#define REG_DMA3CNT     (*(volatile u32*)0x040000DC)
+#define DMA_ENABLE      0x80000000
+#define DMA_16BIT       0x00000000
+#define DMA_32BIT       0x04000000
 
 #define DCNT_MODE5      0x0005
 #define DCNT_BG2        0x0400
@@ -105,7 +119,7 @@ static const s16 sin_lut[256] = {
 
 static inline fix16_t fix16_sin(fix16_t angle) {
     int idx = ((angle * 256) / 411775) & 255;
-    return -((fix16_t)sin_lut[idx] << 2);  // Negate for PICO-8
+    return (fix16_t)sin_lut[idx] << 2;  // Standard sin (same as libfixmath)
 }
 
 static inline fix16_t fix16_cos(fix16_t angle) {
@@ -131,18 +145,30 @@ static const u16 PICO8_PALETTE[16] = {
     RGB15(5,21,31), RGB15(16,14,19), RGB15(31,14,21), RGB15(31,25,21),
 };
 
-// Screen buffer (in EWRAM - too large for IWRAM)
-EWRAM_DATA static u8 screen[SCREEN_HEIGHT][SCREEN_WIDTH];
-EWRAM_DATA static u8 spritesheet[128][128];
+// Render directly to VRAM in RGB555 format (no intermediate buffer)
 EWRAM_DATA static u8 map_memory[0x1000];
-static u8 palette_map[16];
-static u8 draw_color = 7;
-static int clip_x1 = 0, clip_y1 = 0, clip_x2 = SCREEN_WIDTH - 1, clip_y2 = SCREEN_HEIGHT - 1;
+static u16 palette_map[16];  // Now stores RGB555 colors directly
+static u16 draw_color_rgb = 0x7FFF;
 static u32 rnd_state = 1;
 static bool btn_state[6] = {false};
 static bool btn_prev[6] = {false};
 EWRAM_DATA static s32 cart_data[64];
 static int current_page = 0;
+static volatile u16* vram_buffer;  // Points to back buffer
+
+// Dither pattern in IWRAM for fast access
+IWRAM_DATA static u8 dither_pattern[8][8];
+
+// Spritesheet stays in ROM (const) for faster access
+// Will be accessed via hyperspace_spritesheet directly
+
+// Fast inline macros for pixel operations (no function call overhead)
+#define SGET_FAST(x, y) (hyperspace_spritesheet[y][x])
+#define VRAM_PSET(x, y, c) do { \
+    if ((unsigned)(x) < SCREEN_WIDTH && (unsigned)(y) < SCREEN_HEIGHT) \
+        vram_buffer[((y) + SCREEN_OFFSET_Y) * M5_WIDTH + (x) + SCREEN_OFFSET_X] = (c); \
+} while(0)
+#define VRAM_PSET_FAST(x, y, c) (vram_buffer[((y) + SCREEN_OFFSET_Y) * M5_WIDTH + (x) + SCREEN_OFFSET_X] = (c))
 
 #define FIX_HALF F16(0.5)
 #define FIX_TWO F16(2.0)
@@ -150,33 +176,43 @@ static int current_page = 0;
 #define FIX_SCREEN_CENTER F16(60.0)
 #define FIX_PROJ_CONST F16(-75.0)
 
-// PICO-8 API
-static void cls(void) { memset(screen, 0, sizeof(screen)); }
+// Clipping region
+static int clip_x1 = 0, clip_y1 = 0, clip_x2 = SCREEN_WIDTH - 1, clip_y2 = SCREEN_HEIGHT - 1;
 
-static void pset(int x, int y, int c) {
-    if (x >= clip_x1 && x <= clip_x2 && y >= clip_y1 && y <= clip_y2 &&
-        x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-        screen[y][x] = palette_map[c & 15];
+// PICO-8 API - Optimized for direct VRAM rendering
+static void cls(void) {
+    // Use DMA to clear the visible area of VRAM quickly
+    volatile u16* dst = vram_buffer + SCREEN_OFFSET_Y * M5_WIDTH + SCREEN_OFFSET_X;
+    for (int y = 0; y < SCREEN_HEIGHT; y++) {
+        u32* row = (u32*)&dst[y * M5_WIDTH];
+        for (int x = 0; x < SCREEN_WIDTH / 2; x++) row[x] = 0;
     }
 }
 
-static u8 pget(int x, int y) {
-    if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) return screen[y][x];
+static inline void pset(int x, int y, int c) {
+    if ((unsigned)x < (unsigned)SCREEN_WIDTH && (unsigned)y < (unsigned)SCREEN_HEIGHT)
+        vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + x + SCREEN_OFFSET_X] = palette_map[c & 15];
+}
+
+static inline u16 pget_rgb(int x, int y) {
+    if ((unsigned)x < (unsigned)SCREEN_WIDTH && (unsigned)y < (unsigned)SCREEN_HEIGHT)
+        return vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + x + SCREEN_OFFSET_X];
     return 0;
 }
 
-static u8 sget(int x, int y) {
-    if (x >= 0 && x < 128 && y >= 0 && y < 128) return spritesheet[y][x];
-    return 0;
+// sget returns palette index from ROM spritesheet
+static inline u8 sget(int x, int y) {
+    return SGET_FAST(x, y);
 }
 
 static void line(int x0, int y0, int x1, int y1, int c) {
+    u16 col = palette_map[c & 15];
     int dx = x1 - x0, dy = y1 - y0;
     int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
     dx = dx < 0 ? -dx : dx; dy = dy < 0 ? -dy : dy;
     int err = dx - dy;
     while (1) {
-        pset(x0, y0, c);
+        VRAM_PSET(x0, y0, col);
         if (x0 == x1 && y0 == y1) break;
         int e2 = 2 * err;
         if (e2 > -dy) { err -= dy; x0 += sx; }
@@ -185,33 +221,58 @@ static void line(int x0, int y0, int x1, int y1, int c) {
 }
 
 static void rectfill(int x0, int y0, int x1, int y1, int c) {
+    u16 col = palette_map[c & 15];
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-    for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++)
-            pset(x, y, c);
+    if (x0 < 0) x0 = 0; if (x1 >= SCREEN_WIDTH) x1 = SCREEN_WIDTH - 1;
+    if (y0 < 0) y0 = 0; if (y1 >= SCREEN_HEIGHT) y1 = SCREEN_HEIGHT - 1;
+    for (int y = y0; y <= y1; y++) {
+        volatile u16* row = &vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+        for (int x = x0; x <= x1; x++) row[x] = col;
+    }
 }
 
 static void circfill(int cx, int cy, int r, int c) {
-    for (int y = -r; y <= r; y++)
-        for (int x = -r; x <= r; x++)
-            if (x*x + y*y <= r*r) pset(cx + x, cy + y, c);
+    u16 col = palette_map[c & 15];
+    int r2 = r * r;
+    for (int y = -r; y <= r; y++) {
+        int py = cy + y;
+        if ((unsigned)py >= (unsigned)SCREEN_HEIGHT) continue;
+        int max_x = 0;
+        while (max_x <= r && max_x * max_x + y * y <= r2) max_x++;
+        max_x--;
+        int x0 = cx - max_x, x1 = cx + max_x;
+        if (x0 < 0) x0 = 0; if (x1 >= SCREEN_WIDTH) x1 = SCREEN_WIDTH - 1;
+        if (x0 <= x1) {
+            volatile u16* row = &vram_buffer[(py + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+            for (int x = x0; x <= x1; x++) row[x] = col;
+        }
+    }
 }
 
 static void spr(int n, int x, int y, int w, int h) {
-    int sx = (n % 16) * 8, sy = (n / 16) * 8;
-    for (int py = 0; py < h * 8; py++)
-        for (int px = 0; px < w * 8; px++) {
-            u8 c = sget(sx + px, sy + py);
-            if (c != 0) pset(x + px, y + py, palette_map[c]);
+    int sx = (n & 15) * 8, sy = (n >> 4) * 8;
+    int pw = w * 8, ph = h * 8;
+    for (int py = 0; py < ph; py++) {
+        int dy = y + py;
+        if (dy < clip_y1 || dy > clip_y2) continue;
+        if ((unsigned)dy >= (unsigned)SCREEN_HEIGHT) continue;
+        volatile u16* row = &vram_buffer[(dy + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+        for (int px = 0; px < pw; px++) {
+            int dx = x + px;
+            if (dx < clip_x1 || dx > clip_x2) continue;
+            if ((unsigned)dx >= (unsigned)SCREEN_WIDTH) continue;
+            u8 c = SGET_FAST(sx + px, sy + py);
+            if (c != 0) row[dx] = palette_map[c];
         }
+    }
 }
 
-static void pal_reset(void) { for (int i = 0; i < 16; i++) palette_map[i] = i; }
-static void pal(int c0, int c1) { palette_map[c0 & 15] = c1 & 15; }
+static void pal_reset(void) { for (int i = 0; i < 16; i++) palette_map[i] = PICO8_PALETTE[i]; }
+static void pal(int c0, int c1) { palette_map[c0 & 15] = PICO8_PALETTE[c1 & 15]; }
 static void clip_set(int x, int y, int w, int h) { clip_x1 = x; clip_y1 = y; clip_x2 = x + w - 1; clip_y2 = y + h - 1; }
 static void clip_reset(void) { clip_x1 = 0; clip_y1 = 0; clip_x2 = SCREEN_WIDTH - 1; clip_y2 = SCREEN_HEIGHT - 1; }
-static void color(int c) { draw_color = c & 15; }
+static void color(int c) { draw_color_rgb = palette_map[c & 15]; }
 
 // Font data (3x5)
 static const u8 font_data[96][5] = {
@@ -315,9 +376,6 @@ typedef struct {
     fix16_t rot_x, rot_y, rot_x_spd, rot_y_spd; Vec3 spd, waypoint;
     fix16_t laser_t, stop_laser_t, next_laser_t, laser_offset_x[2], laser_offset_y[2];
 } Enemy;
-
-// Include sprite data
-#include "../hyperspace_data.h"
 
 // Game state
 static Mesh ship_mesh;
@@ -522,44 +580,101 @@ static void transform_pos(Vec3* proj, const Mat34* mat, const Vec3* pos) {
     if (c > 0 && c <= F16(10.0)) proj->z = c; else proj->z = 0;
 }
 
-// Rasterization
+// Optimized rasterization using scanline interpolation (no per-pixel division)
+// Uses affine texture mapping with edge walking
 static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16_t* uv1, fix16_t* uv2, fix16_t light) {
-    fix16_t y0 = v0->y, y1 = v1->y;
-    fix16_t firstline, lastline;
-    if (y0 < y1) { firstline = fix16_floor(y0 + FIX_HALF) + FIX_HALF; lastline = fix16_floor(y1 - FIX_HALF) + FIX_HALF; }
-    else if (y0 == y1) return;
-    else { firstline = fix16_floor(y1 + FIX_HALF) + FIX_HALF; lastline = fix16_floor(y0 - FIX_HALF) + FIX_HALF; }
-    if (firstline < FIX_HALF) firstline = FIX_HALF;
-    if (lastline > F16(SCREEN_HEIGHT - 0.5)) lastline = F16(SCREEN_HEIGHT - 0.5);
-    fix16_t x0 = v0->x, z0 = v0->z, x1 = v1->x, z1 = v1->z, x2 = v2->x, y2 = v2->y, z2 = v2->z;
-    fix16_t cb0 = fix16_mul(x1, y2) - fix16_mul(x2, y1);
-    fix16_t cb1 = fix16_mul(x2, y0) - fix16_mul(x0, y2);
-    fix16_t d = cb0 + cb1 + fix16_mul(x0, y1) - fix16_mul(x1, y0);
-    if (fix16_abs(d) < F16(0.001)) return;
-    fix16_t dy = y1 - y0;
-    if (fix16_abs(dy) < F16(0.001)) return;
-    fix16_t invdy = fix16_div(fix16_one, dy);
+    // v0 is top vertex, v1 and v2 are bottom vertices at same y
+    fix16_t y_top = v0->y, y_bot = v1->y;
+    if (y_top == y_bot) return;
+
+    // Determine scanline range
+    int y_start = fix16_to_int(y_top + F16(0.5));
+    int y_end = fix16_to_int(y_bot - F16(0.5));
+    if (y_start < 0) y_start = 0;
+    if (y_end >= SCREEN_HEIGHT) y_end = SCREEN_HEIGHT - 1;
+    if (y_start > y_end) return;
+
+    // Pre-calculate edge gradients (one division per edge, not per pixel)
+    fix16_t dy = y_bot - y_top;
+    if (fix16_abs(dy) < F16(0.01)) return;
+    fix16_t inv_dy = fix16_div(fix16_one, dy);
+
+    // Left edge gradients (v0 to v1)
+    fix16_t dx_left = fix16_mul(v1->x - v0->x, inv_dy);
+    fix16_t dz_left = fix16_mul(v1->z - v0->z, inv_dy);
+    fix16_t du_left = fix16_mul(uv1[0] - uv0[0], inv_dy);
+    fix16_t dv_left = fix16_mul(uv1[1] - uv0[1], inv_dy);
+
+    // Right edge gradients (v0 to v2)
+    fix16_t dx_right = fix16_mul(v2->x - v0->x, inv_dy);
+    fix16_t dz_right = fix16_mul(v2->z - v0->z, inv_dy);
+    fix16_t du_right = fix16_mul(uv2[0] - uv0[0], inv_dy);
+    fix16_t dv_right = fix16_mul(uv2[1] - uv0[1], inv_dy);
+
+    // Starting values (prestep to first scanline)
+    fix16_t prestep = fix16_from_int(y_start) + FIX_HALF - y_top;
+    fix16_t x_left = v0->x + fix16_mul(prestep, dx_left);
+    fix16_t x_right = v0->x + fix16_mul(prestep, dx_right);
+    fix16_t z_left = v0->z + fix16_mul(prestep, dz_left);
+    fix16_t z_right = v0->z + fix16_mul(prestep, dz_right);
+    fix16_t u_left = uv0[0] + fix16_mul(prestep, du_left);
+    fix16_t u_right = uv0[0] + fix16_mul(prestep, du_right);
+    fix16_t v_left = uv0[1] + fix16_mul(prestep, dv_left);
+    fix16_t v_right = uv0[1] + fix16_mul(prestep, dv_right);
+
+    // Texture info
     int tex_x = cur_tex->x, tex_y = cur_tex->y, tex_lit_x = cur_tex->light_x;
-    for (fix16_t y = firstline; y <= lastline; y += fix16_one) {
-        fix16_t coef = fix16_mul(y - y0, invdy);
-        fix16_t xfirst = fix16_floor(x0 + fix16_mul(coef, x1 - x0) + F16(0.48)) + FIX_HALF;
-        fix16_t xlast = fix16_floor(x0 + fix16_mul(coef, x2 - x0) - F16(0.48)) + FIX_HALF;
-        if (xfirst < FIX_HALF) xfirst = FIX_HALF;
-        if (xlast > F16(SCREEN_WIDTH - 0.5)) xlast = F16(SCREEN_WIDTH - 0.5);
-        for (fix16_t x = xfirst; x <= xlast; x += fix16_one) {
-            fix16_t b0 = fix16_div(cb0 + fix16_mul(x, y1) + fix16_mul(x2, y) - fix16_mul(x, y2) - fix16_mul(x1, y), d);
-            fix16_t b1 = fix16_div(cb1 + fix16_mul(x, y2) + fix16_mul(x0, y) - fix16_mul(x, y0) - fix16_mul(x2, y), d);
-            fix16_t b2 = fix16_one - b0 - b1;
-            b0 = fix16_mul(b0, z0); b1 = fix16_mul(b1, z1); b2 = fix16_mul(b2, z2);
-            fix16_t d2 = b0 + b1 + b2;
-            if (fix16_abs(d2) < F16(0.001)) continue;
-            fix16_t uvx = fix16_div(fix16_mul(b0, uv0[0]) + fix16_mul(b1, uv1[0]) + fix16_mul(b2, uv2[0]), d2);
-            fix16_t uvy = fix16_div(fix16_mul(b0, uv0[1]) + fix16_mul(b1, uv1[1]) + fix16_mul(b2, uv2[1]), d2);
-            int offset_x = tex_x, px = fix16_to_int(x), py = fix16_to_int(y);
-            int dither_val = sget(px % 8, 56 + py % 8);
-            if (light <= F16(7.0) + fix16_mul(fix16_from_int(dither_val), F16(0.125))) offset_x += tex_lit_x;
-            pset(px, py, sget(fix16_to_int(uvx) + offset_x, fix16_to_int(uvy) + tex_y));
+    // Pre-calculate light threshold (avoid per-pixel calculation)
+    int use_lit = (light <= F16(11.0)) ? 1 : 0;  // Simplified dithering
+
+    // Scanline loop
+    for (int y = y_start; y <= y_end; y++) {
+        int xl = fix16_to_int(x_left + FIX_HALF);
+        int xr = fix16_to_int(x_right - FIX_HALF);
+
+        if (xl < 0) xl = 0;
+        if (xr >= SCREEN_WIDTH) xr = SCREEN_WIDTH - 1;
+
+        if (xl <= xr) {
+            // Calculate horizontal gradients for this scanline
+            fix16_t span = x_right - x_left;
+            if (span > F16(0.5)) {
+                fix16_t inv_span = fix16_div(fix16_one, span);
+                fix16_t du_dx = fix16_mul(u_right - u_left, inv_span);
+                fix16_t dv_dx = fix16_mul(v_right - v_left, inv_span);
+
+                // Prestep to first pixel
+                fix16_t x_prestep = fix16_from_int(xl) + FIX_HALF - x_left;
+                fix16_t u = u_left + fix16_mul(x_prestep, du_dx);
+                fix16_t v = v_left + fix16_mul(x_prestep, dv_dx);
+
+                // Get row pointer for fast access
+                volatile u16* row = &vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+
+                // Pixel loop with incremental UV (no division!)
+                int offset_x = tex_x;
+                if (use_lit && ((y ^ xl) & 1)) offset_x += tex_lit_x;  // Simple dither pattern
+
+                for (int x = xl; x <= xr; x++) {
+                    int tu = fix16_to_int(u);
+                    int tv = fix16_to_int(v);
+                    u8 c = SGET_FAST(tu + offset_x, tv + tex_y);
+                    row[x] = palette_map[c];
+                    u += du_dx;
+                    v += dv_dx;
+                }
+            }
         }
+
+        // Step to next scanline
+        x_left += dx_left;
+        x_right += dx_right;
+        z_left += dz_left;
+        z_right += dz_right;
+        u_left += du_left;
+        u_right += du_right;
+        v_left += dv_left;
+        v_right += dv_right;
     }
 }
 
@@ -997,21 +1112,17 @@ static void game_draw(void) {
     if (fade_ratio > 0) { Vec3 center = {FIX_SCREEN_CENTER, FIX_SCREEN_CENTER, fix16_one}; draw_explosion(&center, fade_ratio); }
 }
 
-// GBA-specific
+// GBA-specific - optimized
 static void vsync(void) { while (REG_VCOUNT >= 160); while (REG_VCOUNT < 160); }
 
 static void flip_screen(void) {
-    volatile u16* vram = current_page ? VRAM_PAGE1 : VRAM_PAGE2;
-    for (int y = 0; y < M5_HEIGHT; y++) {
-        for (int x = 0; x < M5_WIDTH; x++) {
-            int sy = y - SCREEN_OFFSET_Y, sx = x - SCREEN_OFFSET_X;
-            if (sy >= 0 && sy < SCREEN_HEIGHT && sx >= 0 && sx < SCREEN_WIDTH)
-                vram[y * M5_WIDTH + x] = PICO8_PALETTE[screen[sy][sx]];
-            else vram[y * M5_WIDTH + x] = 0;
-        }
-    }
+    // Swap display page
+    // When DCNT_PAGE is set: display page 2 (0x0600A000), draw to page 1
+    // When DCNT_PAGE is clear: display page 1 (0x06000000), draw to page 2
     current_page = 1 - current_page;
     REG_DISPCNT = DCNT_MODE5 | DCNT_BG2 | (current_page ? DCNT_PAGE : 0);
+    // Point vram_buffer to the back buffer (opposite of displayed page)
+    vram_buffer = current_page ? VRAM_PAGE1 : VRAM_PAGE2;
 }
 
 static void update_input(void) {
@@ -1023,18 +1134,49 @@ static void update_input(void) {
 }
 
 static void load_embedded_data(void) {
-    memcpy(spritesheet, hyperspace_spritesheet, sizeof(spritesheet));
+    // Spritesheet is accessed directly from ROM (hyperspace_spritesheet)
+    // Only copy map data to RAM
     memcpy(map_memory, hyperspace_map, sizeof(map_memory));
+
+    // Initialize dither pattern in IWRAM for fast access
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            dither_pattern[y][x] = SGET_FAST(x, 56 + y);
+        }
+    }
+}
+
+static void clear_vram(void) {
+    // Clear both VRAM pages at startup
+    volatile u32* p1 = (volatile u32*)VRAM_PAGE1;
+    volatile u32* p2 = (volatile u32*)VRAM_PAGE2;
+    for (int i = 0; i < M5_WIDTH * M5_HEIGHT / 2; i++) {
+        p1[i] = 0;
+        p2[i] = 0;
+    }
 }
 
 static void game_init(void) {
-    pal_reset(); load_cart_data(); load_embedded_data();
+    // Initialize: display page 1, draw to page 2
+    current_page = 0;
+    vram_buffer = VRAM_PAGE2;
+
+    clear_vram();
+    pal_reset();
+    load_cart_data();
+    load_embedded_data();
     init_main(); init_ship(); init_nme(); init_trail(); init_bg();
 }
 
 int main(void) {
     REG_DISPCNT = DCNT_MODE5 | DCNT_BG2;
     game_init();
-    while (1) { vsync(); update_input(); game_update(); game_draw(); flip_screen(); }
+    while (1) {
+        update_input();
+        game_update();
+        game_draw();
+        vsync();        // Wait for VBlank
+        flip_screen();  // Flip during VBlank to avoid tearing
+    }
     return 0;
 }
