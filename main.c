@@ -145,7 +145,8 @@ static void pset(int x, int y, int c) {
 }
 
 // Fast pset - no clipping, no bounds check (for rasterizer inner loop)
-#define PSET_FAST(x, y, c) (screen[(y)][(x)] = (c))
+// Still uses palette_map for palette animation to work
+#define PSET_FAST(x, y, c) (screen[(y)][(x)] = palette_map[(c) & 15])
 
 static uint8_t pget(int x, int y) {
     if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
@@ -624,9 +625,9 @@ static fix16_t interpolation_ratio, interpolation_spd;
 static Texture* cur_tex;
 static Vec3* t_light_dir;
 
-// Palette animation
-static int ngn_colors[4] = {13, 12, 7, 12};
-static int laser_ngn_colors[4] = {3, 11, 7, 11};
+// Palette animation (engine glow effect)
+static int ngn_colors[4] = {12, 1, 12, 7};  // blue, dark blue, blue, white
+static int laser_ngn_colors[4] = {12, 14, 8, 15};  // blue, pink, red, peach
 static fix16_t ngn_col_idx = 0;
 static fix16_t ngn_laser_col_idx = 0;
 
@@ -1867,8 +1868,11 @@ static void draw_lasers(Laser* in_lasers, int count, int col) {
 }
 
 static void set_ngn_pal(void) {
-    ngn_col_idx = fix16_mod(ngn_col_idx + fix16_one, F16(4.0));
-    ngn_laser_col_idx = fix16_mod(ngn_laser_col_idx + F16(0.2), F16(4.0));
+    // Fast wrap-around without division
+    ngn_col_idx += fix16_one;
+    if (ngn_col_idx >= F16(4.0)) ngn_col_idx -= F16(4.0);
+    ngn_laser_col_idx += F16(0.2);
+    if (ngn_laser_col_idx >= F16(4.0)) ngn_laser_col_idx -= F16(4.0);
 
     pal(12, ngn_colors[fix16_to_int(ngn_col_idx)]);
 
