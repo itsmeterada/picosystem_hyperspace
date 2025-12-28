@@ -165,6 +165,7 @@ PicoSystem版との主な違い:
 ## 関連プロジェクト
 
 - [Hyperspace SDL2](https://github.com/itsmeterada/hyperspace) - デスクトッププラットフォーム向けSDL2移植版（Windows、macOS、Linux）
+- [Hyperspace for Thumby Color](https://github.com/itsmeterada/hyperspace_thumbycolor) - TinyCircuits Thumby Color向け移植版（RP2350、128x128ディスプレイ）
 
 ## クレジット
 

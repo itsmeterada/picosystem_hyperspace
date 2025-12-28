@@ -165,6 +165,7 @@ Key differences from PicoSystem version:
 ## Related Projects
 
 - [Hyperspace SDL2](https://github.com/itsmeterada/hyperspace) - SDL2 port for desktop platforms (Windows, macOS, Linux)
+- [Hyperspace for Thumby Color](https://github.com/itsmeterada/hyperspace_thumbycolor) - Port for TinyCircuits Thumby Color (RP2350, 128x128 display)
 
 ## Credits
 
