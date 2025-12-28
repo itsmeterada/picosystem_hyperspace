@@ -80,9 +80,19 @@ static inline fix16_t fix16_mul(fix16_t a, fix16_t b) {
     return (fix16_t)(((s64)a * b) >> 16);
 }
 
+// Optimized division - avoid when possible, use reciprocal multiply instead
 static inline fix16_t fix16_div(fix16_t a, fix16_t b) {
     if (b == 0) return 0;
+    // For small divisors, use direct division
     return (fix16_t)(((s64)a << 16) / b);
+}
+
+// Fast reciprocal: returns 1/x in fixed point (for x in 0.5 to 128 range)
+static inline fix16_t fix16_recip(fix16_t x) {
+    if (x == 0) return 0;
+    if (x < 0) return -fix16_recip(-x);
+    // 1.0 / x = 65536 * 65536 / x
+    return (fix16_t)(((s64)0x100000000LL) / x);
 }
 
 static inline fix16_t fix16_from_int(int a) { return a << 16; }
@@ -91,11 +101,6 @@ static inline fix16_t fix16_floor(fix16_t x) { return x & 0xFFFF0000; }
 static inline fix16_t fix16_abs(fix16_t x) { return x < 0 ? -x : x; }
 static inline fix16_t fix16_min(fix16_t a, fix16_t b) { return a < b ? a : b; }
 static inline fix16_t fix16_max(fix16_t a, fix16_t b) { return a > b ? a : b; }
-
-static inline fix16_t fix16_mod(fix16_t a, fix16_t b) {
-    if (b == 0) return 0;
-    return a - fix16_mul(fix16_floor(fix16_div(a, b)), b);
-}
 
 // Sin/Cos LUT (256 entries)
 static const s16 sin_lut[256] = {
@@ -127,14 +132,21 @@ static inline fix16_t fix16_cos(fix16_t angle) {
     return (fix16_t)sin_lut[idx] << 2;
 }
 
+// Fast integer square root (for initial guess)
+static inline u32 isqrt(u32 n) {
+    u32 x = n, y = (x + 1) >> 1;
+    while (y < x) { x = y; y = (x + n / x) >> 1; }
+    return x;
+}
+
+// Optimized fixed-point sqrt using better initial guess
 static inline fix16_t fix16_sqrt(fix16_t x) {
     if (x <= 0) return 0;
-    fix16_t guess = x >> 1;
-    if (guess == 0) guess = 1;
-    for (int i = 0; i < 8; i++) {
-        guess = (guess + fix16_div(x, guess)) >> 1;
-    }
-    return guess;
+    // sqrt(x) in Q16.16 = sqrt(x * 65536) / 256 * 65536 = sqrt(x) * 256
+    // Use integer sqrt for speed
+    u32 val = (u32)x;
+    u32 root = isqrt(val << 8);  // Shift for more precision
+    return (fix16_t)(root << 4);
 }
 
 // PICO-8 palette in RGB555
@@ -582,6 +594,8 @@ static void transform_pos(Vec3* proj, const Mat34* mat, const Vec3* pos) {
 
 // Optimized rasterization using scanline interpolation (no per-pixel division)
 // Uses affine texture mapping with edge walking
+// ARM mode for faster execution (Thumb is slower for math-heavy code)
+__attribute__((target("arm")))
 static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16_t* uv1, fix16_t* uv2, fix16_t light) {
     // v0 is top vertex, v1 and v2 are bottom vertices at same y
     fix16_t y_top = v0->y, y_bot = v1->y;
@@ -678,10 +692,24 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16
     }
 }
 
+__attribute__((target("arm")))
 static void rasterize_tri(int index, Triangle* tris, Vec3* projs) {
     Triangle* tri = &tris[index];
     if (tri->tri[0] < 0 || tri->tri[1] < 0 || tri->tri[2] < 0 || !cur_tex) return;
     Vec3* v0 = &projs[tri->tri[0]], *v1 = &projs[tri->tri[1]], *v2 = &projs[tri->tri[2]];
+
+    // Early z-culling: skip if all vertices behind camera
+    if (v0->z <= 0 && v1->z <= 0 && v2->z <= 0) return;
+
+    // Early screen bounds culling
+    fix16_t min_x = fix16_min(v0->x, fix16_min(v1->x, v2->x));
+    fix16_t max_x = fix16_max(v0->x, fix16_max(v1->x, v2->x));
+    fix16_t min_y = fix16_min(v0->y, fix16_min(v1->y, v2->y));
+    fix16_t max_y = fix16_max(v0->y, fix16_max(v1->y, v2->y));
+    if (max_x < 0 || min_x >= F16(SCREEN_WIDTH)) return;
+    if (max_y < 0 || min_y >= F16(SCREEN_HEIGHT)) return;
+
+    // Backface culling
     fix16_t nz = fix16_mul(v1->x - v0->x, v2->y - v0->y) - fix16_mul(v1->y - v0->y, v2->x - v0->x);
     if (nz < 0) return;
     Vec3 *tv0 = v0, *tv1 = v1, *tv2 = v2;
@@ -700,14 +728,22 @@ static void rasterize_tri(int index, Triangle* tris, Vec3* projs) {
     else { rasterize_flat_tri(tv0, &v3, tv1, tuv0, uv3, tuv1, light); rasterize_flat_tri(tv2, &v3, tv1, tuv2, uv3, tuv1, light); }
 }
 
-static int tri_compare(const void* a, const void* b) {
-    const Triangle* ta = (const Triangle*)a, *tb = (const Triangle*)b;
-    if (ta->z < tb->z) return -1; if (ta->z > tb->z) return 1; return 0;
-}
-
+// Insertion sort - faster than qsort for small arrays (< 20 elements)
 static void sort_tris(Triangle* tris, int num, Vec3* projs) {
-    for (int i = 0; i < num; i++) tris[i].z = projs[tris[i].tri[0]].z + projs[tris[i].tri[1]].z + projs[tris[i].tri[2]].z;
-    qsort(tris, num, sizeof(Triangle), tri_compare);
+    // Calculate z values
+    for (int i = 0; i < num; i++) {
+        tris[i].z = projs[tris[i].tri[0]].z + projs[tris[i].tri[1]].z + projs[tris[i].tri[2]].z;
+    }
+    // Insertion sort (stable, fast for small n, no function call overhead)
+    for (int i = 1; i < num; i++) {
+        Triangle temp = tris[i];
+        int j = i - 1;
+        while (j >= 0 && tris[j].z > temp.z) {
+            tris[j + 1] = tris[j];
+            j--;
+        }
+        tris[j + 1] = temp;
+    }
 }
 
 // Game initialization
@@ -1057,11 +1093,14 @@ static void draw_lasers(Laser* arr, int count, int col) {
 }
 
 static void set_ngn_pal(void) {
-    ngn_col_idx = fix16_mod(ngn_col_idx + fix16_one, F16(4.0));
-    ngn_laser_col_idx = fix16_mod(ngn_laser_col_idx + F16(0.2), F16(4.0));
+    // Fast wrap-around without division
+    ngn_col_idx += fix16_one;
+    if (ngn_col_idx >= F16(4.0)) ngn_col_idx -= F16(4.0);
+    ngn_laser_col_idx += F16(0.2);
+    if (ngn_laser_col_idx >= F16(4.0)) ngn_laser_col_idx -= F16(4.0);
     pal(12, ngn_colors[fix16_to_int(ngn_col_idx)]);
     int idx = fix16_to_int(ngn_laser_col_idx);
-    pal(8, laser_ngn_colors[idx]); pal(14, laser_ngn_colors[(idx + 1) % 4]); pal(15, laser_ngn_colors[(idx + 2) % 4]);
+    pal(8, laser_ngn_colors[idx]); pal(14, laser_ngn_colors[(idx + 1) & 3]); pal(15, laser_ngn_colors[(idx + 2) & 3]);
 }
 
 static void game_draw(void) {
@@ -1085,10 +1124,10 @@ static void game_draw(void) {
             if (nme->life < 0 || nme->hit_t > -1) {
                 if (nme->life < 0) { fix16_t r = FIX_HALF + fix16_div(F16(15.0) + fix16_from_int(nme->life), F16(30.0));
                     fix16_t sz = fix16_mul(fix16_mul(r, nme_radius[nme->type - 1]), F16(0.8));
-                    if ((-nme->life) % 2 == 0) cur_tex = &nme_tex_hit;
+                    if (((-nme->life) & 1) == 0) cur_tex = &nme_tex_hit;
                     for (int j = 0; j < 3; j++) draw_explosion(&nme->proj[get_random_idx(mesh->num_vertices)], sz);
                 } else { fix16_t r = FIX_HALF + fix16_div(F16(6.0) - fix16_from_int(nme->hit_t), F16(12.0));
-                    if (nme->hit_t % 2 == 0) cur_tex = &nme_tex_hit; transform_pos(&p0, &cam_mat, &nme->hit_pos); draw_explosion(&p0, fix16_mul(r, F16(3.0))); }
+                    if ((nme->hit_t & 1) == 0) cur_tex = &nme_tex_hit; transform_pos(&p0, &cam_mat, &nme->hit_pos); draw_explosion(&p0, fix16_mul(r, F16(3.0))); }
             }
             if (cur_tex) { t_light_dir = &nme->light_dir; for (int j = 0; j < mesh->num_triangles; j++) rasterize_tri(j, mesh->triangles, nme->proj); }
         }
@@ -1098,7 +1137,7 @@ static void game_draw(void) {
     if (laser_spawned) cur_tex = &ship_tex_laser_lit; else cur_tex = &ship_tex;
     sort_tris(ship_mesh.triangles, ship_mesh.num_triangles, ship_mesh.projected);
     if (hit_t != -1) { transform_pos(&p0, &cam_mat, &hit_pos); draw_explosion(&p0, F16(3.0));
-        if (hit_t % 2 == 0) { pal(0, 2); pal(1, 8); pal(6, 14); pal(9, 8); pal(10, 14); pal(13, 14); } }
+        if ((hit_t & 1) == 0) { pal(0, 2); pal(1, 8); pal(6, 14); pal(9, 8); pal(10, 14); pal(13, 14); } }
     t_light_dir = &ship_light_dir; set_ngn_pal();
     for (int i = 0; i < ship_mesh.num_triangles; i++) rasterize_tri(i, ship_mesh.triangles, ship_mesh.projected);
     pal_reset();
