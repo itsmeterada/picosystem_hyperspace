@@ -107,6 +107,6 @@ def convert_p8_to_header(p8_file, output_file):
     print(f"Generated {output_file}")
 
 if __name__ == '__main__':
-    p8_file = '/home/terada/trees/itsmeterada/pico/hyperspace/hyperspace.lua.p8'
+    p8_file = '/home/terada/trees/itsmeterada/pico/picosystem_hyperspace/hyperspace.lua.p8'
     output_file = '/home/terada/trees/itsmeterada/pico/picosystem_hyperspace/hyperspace_data.h'
     convert_p8_to_header(p8_file, output_file)

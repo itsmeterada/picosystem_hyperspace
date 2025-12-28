@@ -626,8 +626,10 @@ static Texture* cur_tex;
 static Vec3* t_light_dir;
 
 // Palette animation (engine glow effect)
-static int ngn_colors[4] = {12, 1, 12, 7};  // blue, dark blue, blue, white
-static int laser_ngn_colors[4] = {12, 14, 8, 15};  // blue, pink, red, peach
+// PICO-8 original: ngn_colors = {13,12,7,12}
+static int ngn_colors[4] = {13, 12, 7, 12};  // indigo, blue, white, blue
+// PICO-8 original: laser_ngn_colors = {3,11,7,11}
+static int laser_ngn_colors[4] = {3, 11, 7, 11};  // dark green, green, white, green
 static fix16_t ngn_col_idx = 0;
 static fix16_t ngn_laser_col_idx = 0;
 
