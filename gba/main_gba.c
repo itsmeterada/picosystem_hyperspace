@@ -40,6 +40,16 @@ typedef unsigned long long u64;
 #define DMA_ENABLE      0x80000000
 #define DMA_16BIT       0x00000000
 #define DMA_32BIT       0x04000000
+#define DMA_SRC_FIXED   0x01000000
+#define DMA_DST_INC     0x00000000
+
+// BG2 affine transformation registers
+#define REG_BG2PA       (*(volatile u16*)0x04000020)
+#define REG_BG2PB       (*(volatile u16*)0x04000022)
+#define REG_BG2PC       (*(volatile u16*)0x04000024)
+#define REG_BG2PD       (*(volatile u16*)0x04000026)
+#define REG_BG2X        (*(volatile u32*)0x04000028)
+#define REG_BG2Y        (*(volatile u32*)0x0400002C)
 
 #define DCNT_MODE5      0x0005
 #define DCNT_BG2        0x0400
@@ -60,15 +70,11 @@ typedef unsigned long long u64;
 #define VRAM_PAGE2      ((volatile u16*)0x0600A000)
 #define SRAM            ((volatile u8*)0x0E000000)
 
-#define M5_WIDTH        160
-#define M5_HEIGHT       128
-
 #define RGB15(r,g,b)    (((r)&31) | (((g)&31)<<5) | (((b)&31)<<10))
 
-#define SCREEN_WIDTH    120
-#define SCREEN_HEIGHT   120
-#define SCREEN_OFFSET_X ((M5_WIDTH - SCREEN_WIDTH) / 2)
-#define SCREEN_OFFSET_Y ((M5_HEIGHT - SCREEN_HEIGHT) / 2)
+// Mode 5 framebuffer dimensions (scaled to fill 240x160 screen)
+#define SCREEN_WIDTH    160
+#define SCREEN_HEIGHT   128
 
 // Fixed-point math
 typedef s32 fix16_t;
@@ -178,37 +184,46 @@ IWRAM_DATA static u8 dither_pattern[8][8];
 #define SGET_FAST(x, y) (hyperspace_spritesheet[y][x])
 #define VRAM_PSET(x, y, c) do { \
     if ((unsigned)(x) < SCREEN_WIDTH && (unsigned)(y) < SCREEN_HEIGHT) \
-        vram_buffer[((y) + SCREEN_OFFSET_Y) * M5_WIDTH + (x) + SCREEN_OFFSET_X] = (c); \
+        vram_buffer[(y) * SCREEN_WIDTH + (x)] = (c); \
 } while(0)
-#define VRAM_PSET_FAST(x, y, c) (vram_buffer[((y) + SCREEN_OFFSET_Y) * M5_WIDTH + (x) + SCREEN_OFFSET_X] = (c))
+#define VRAM_PSET_FAST(x, y, c) (vram_buffer[(y) * SCREEN_WIDTH + (x)] = (c))
 
 #define FIX_HALF F16(0.5)
 #define FIX_TWO F16(2.0)
 #define FIX_TWO_PI F16(6.28318530718)
-#define FIX_SCREEN_CENTER F16(60.0)
+// Screen center for 160x128
+#define FIX_SCREEN_CENTER_X F16(80.0)
+#define FIX_SCREEN_CENTER_Y F16(64.0)
 #define FIX_PROJ_CONST F16(-75.0)
 
 // Clipping region
 static int clip_x1 = 0, clip_y1 = 0, clip_x2 = SCREEN_WIDTH - 1, clip_y2 = SCREEN_HEIGHT - 1;
 
+// Fast DMA copy (from mode5.c)
+static inline void DMAFastCopy(void* source, void* dest, u32 count, u32 mode) {
+    REG_DMA3SAD = (u32)source;
+    REG_DMA3DAD = (u32)dest;
+    REG_DMA3CNT = count | mode;
+}
+
+// Clear color for DMA fill
+static u16 clear_color = 0;
+
 // PICO-8 API - Optimized for direct VRAM rendering
 static void cls(void) {
-    // Use DMA to clear the visible area of VRAM quickly
-    volatile u16* dst = vram_buffer + SCREEN_OFFSET_Y * M5_WIDTH + SCREEN_OFFSET_X;
-    for (int y = 0; y < SCREEN_HEIGHT; y++) {
-        u32* row = (u32*)&dst[y * M5_WIDTH];
-        for (int x = 0; x < SCREEN_WIDTH / 2; x++) row[x] = 0;
-    }
+    // Fast clear using DMA with fixed source (fill mode)
+    DMAFastCopy(&clear_color, (void*)vram_buffer, SCREEN_WIDTH * SCREEN_HEIGHT,
+                DMA_SRC_FIXED | DMA_DST_INC | DMA_16BIT | DMA_ENABLE);
 }
 
 static inline void pset(int x, int y, int c) {
     if ((unsigned)x < (unsigned)SCREEN_WIDTH && (unsigned)y < (unsigned)SCREEN_HEIGHT)
-        vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + x + SCREEN_OFFSET_X] = palette_map[c & 15];
+        vram_buffer[y * SCREEN_WIDTH + x] = palette_map[c & 15];
 }
 
 static inline u16 pget_rgb(int x, int y) {
     if ((unsigned)x < (unsigned)SCREEN_WIDTH && (unsigned)y < (unsigned)SCREEN_HEIGHT)
-        return vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + x + SCREEN_OFFSET_X];
+        return vram_buffer[y * SCREEN_WIDTH + x];
     return 0;
 }
 
@@ -239,7 +254,7 @@ static void rectfill(int x0, int y0, int x1, int y1, int c) {
     if (x0 < 0) x0 = 0; if (x1 >= SCREEN_WIDTH) x1 = SCREEN_WIDTH - 1;
     if (y0 < 0) y0 = 0; if (y1 >= SCREEN_HEIGHT) y1 = SCREEN_HEIGHT - 1;
     for (int y = y0; y <= y1; y++) {
-        volatile u16* row = &vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+        volatile u16* row = &vram_buffer[y * SCREEN_WIDTH];
         for (int x = x0; x <= x1; x++) row[x] = col;
     }
 }
@@ -247,18 +262,16 @@ static void rectfill(int x0, int y0, int x1, int y1, int c) {
 static void circfill(int cx, int cy, int r, int c) {
     u16 col = palette_map[c & 15];
     int r2 = r * r;
-    for (int y = -r; y <= r; y++) {
-        int py = cy + y;
+    for (int dy = -r; dy <= r; dy++) {
+        int py = cy + dy;
         if ((unsigned)py >= (unsigned)SCREEN_HEIGHT) continue;
         int max_x = 0;
-        while (max_x <= r && max_x * max_x + y * y <= r2) max_x++;
+        while (max_x <= r && max_x * max_x + dy * dy <= r2) max_x++;
         max_x--;
         int x0 = cx - max_x, x1 = cx + max_x;
         if (x0 < 0) x0 = 0; if (x1 >= SCREEN_WIDTH) x1 = SCREEN_WIDTH - 1;
-        if (x0 <= x1) {
-            volatile u16* row = &vram_buffer[(py + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
-            for (int x = x0; x <= x1; x++) row[x] = col;
-        }
+        volatile u16* row = &vram_buffer[py * SCREEN_WIDTH];
+        for (int px = x0; px <= x1; px++) row[px] = col;
     }
 }
 
@@ -269,7 +282,7 @@ static void spr(int n, int x, int y, int w, int h) {
         int dy = y + py;
         if (dy < clip_y1 || dy > clip_y2) continue;
         if ((unsigned)dy >= (unsigned)SCREEN_HEIGHT) continue;
-        volatile u16* row = &vram_buffer[(dy + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
+        volatile u16* row = &vram_buffer[dy * SCREEN_WIDTH];
         for (int px = 0; px < pw; px++) {
             int dx = x + px;
             if (dx < clip_x1 || dx > clip_x2) continue;
@@ -587,8 +600,8 @@ static void decode_mesh(Mesh* mesh, fix16_t scale) {
 static void transform_pos(Vec3* proj, const Mat34* mat, const Vec3* pos) {
     mat_mul_pos(proj, mat, pos);
     fix16_t c = fix16_div(FIX_PROJ_CONST, proj->z);
-    proj->x = FIX_SCREEN_CENTER + fix16_mul(proj->x, c);
-    proj->y = FIX_SCREEN_CENTER - fix16_mul(proj->y, c);
+    proj->x = FIX_SCREEN_CENTER_X + fix16_mul(proj->x, c);
+    proj->y = FIX_SCREEN_CENTER_Y - fix16_mul(proj->y, c);
     if (c > 0 && c <= F16(10.0)) proj->z = c; else proj->z = 0;
 }
 
@@ -662,13 +675,12 @@ static void rasterize_flat_tri(Vec3* v0, Vec3* v1, Vec3* v2, fix16_t* uv0, fix16
                 fix16_t u = u_left + fix16_mul(x_prestep, du_dx);
                 fix16_t v = v_left + fix16_mul(x_prestep, dv_dx);
 
-                // Get row pointer for fast access
-                volatile u16* row = &vram_buffer[(y + SCREEN_OFFSET_Y) * M5_WIDTH + SCREEN_OFFSET_X];
-
                 // Pixel loop with incremental UV (no division!)
                 int offset_x = tex_x;
                 if (use_lit && ((y ^ xl) & 1)) offset_x += tex_lit_x;  // Simple dither pattern
 
+                // Get row pointer for fast access
+                volatile u16* row = &vram_buffer[y * SCREEN_WIDTH];
                 for (int x = xl; x <= xr; x++) {
                     int tu = fix16_to_int(u);
                     int tv = fix16_to_int(v);
@@ -1142,13 +1154,13 @@ static void game_draw(void) {
     for (int i = 0; i < ship_mesh.num_triangles; i++) rasterize_tri(i, ship_mesh.triangles, ship_mesh.projected);
     pal_reset();
     if (cur_mode == 2) { char buf[32]; snprintf(buf, 32, "SCORE %d", score); print_3d(buf, 1, 1);
-        spr(16, 59, 1, 8, 1); clip_set(59, 1, life * 15, 7); spr(0, 59, 1, 8, 1); clip_reset();
-    } else if (cur_mode != 1) { print_3d("HYPERSPACE", 1, 1); print_3d("GBA Port", 1, 8);
-        if (cur_mode == 0) { print_3d("PRESS L/R", 30, 95); char buf[32]; snprintf(buf, 32, "BEST %d", best_score); print_3d(buf, 1, 112); }
-        else { print_3d("PRESS L/R", 30, 50); print_3d("DPAD:OPT", 30, 60);
+        spr(16, 99, 1, 8, 1); clip_set(99, 1, life * 15, 7); spr(0, 99, 1, 8, 1); clip_reset();
+    } else if (cur_mode != 1) { print_3d("HYPERSPACE", 50, 1); print_3d("GBA Port", 54, 8);
+        if (cur_mode == 0) { print_3d("PRESS L/R", 50, 100); char buf[32]; snprintf(buf, 32, "BEST %d", best_score); print_3d(buf, 1, 120); }
+        else { print_3d("PRESS L/R", 50, 55); print_3d("DPAD:OPT", 50, 65);
             const char* opt[] = {"AUTO", "MANUAL", "INV Y", "NORM Y"};
-            print_3d(opt[manual_fire], 9, 105); print_3d(opt[non_inverted_y + 2], 9, 112); } }
-    if (fade_ratio > 0) { Vec3 center = {FIX_SCREEN_CENTER, FIX_SCREEN_CENTER, fix16_one}; draw_explosion(&center, fade_ratio); }
+            print_3d(opt[manual_fire], 9, 110); print_3d(opt[non_inverted_y + 2], 9, 120); } }
+    if (fade_ratio > 0) { Vec3 center = {FIX_SCREEN_CENTER_X, FIX_SCREEN_CENTER_Y, fix16_one}; draw_explosion(&center, fade_ratio); }
 }
 
 // GBA-specific - optimized
@@ -1186,13 +1198,12 @@ static void load_embedded_data(void) {
 }
 
 static void clear_vram(void) {
-    // Clear both VRAM pages at startup
-    volatile u32* p1 = (volatile u32*)VRAM_PAGE1;
-    volatile u32* p2 = (volatile u32*)VRAM_PAGE2;
-    for (int i = 0; i < M5_WIDTH * M5_HEIGHT / 2; i++) {
-        p1[i] = 0;
-        p2[i] = 0;
-    }
+    // Clear both VRAM pages at startup using DMA
+    u16 zero = 0;
+    DMAFastCopy(&zero, (void*)VRAM_PAGE1, SCREEN_WIDTH * SCREEN_HEIGHT,
+                DMA_SRC_FIXED | DMA_DST_INC | DMA_16BIT | DMA_ENABLE);
+    DMAFastCopy(&zero, (void*)VRAM_PAGE2, SCREEN_WIDTH * SCREEN_HEIGHT,
+                DMA_SRC_FIXED | DMA_DST_INC | DMA_16BIT | DMA_ENABLE);
 }
 
 static void game_init(void) {
@@ -1209,6 +1220,17 @@ static void game_init(void) {
 
 int main(void) {
     REG_DISPCNT = DCNT_MODE5 | DCNT_BG2;
+
+    // Set up BG2 affine transformation for scaling 160x128 → 240x160
+    // Scale factors: X = 160/240 = 0.6667, Y = 128/160 = 0.8
+    // In 8.8 fixed point: PA = 171 (0.6667*256), PD = 205 (0.8*256)
+    REG_BG2PA = 171;        // X scale: 160/240 in 8.8 fixed point
+    REG_BG2PB = 0;          // No rotation/shear
+    REG_BG2PC = 0;          // No rotation/shear
+    REG_BG2PD = 205;        // Y scale: 128/160 in 8.8 fixed point
+    REG_BG2X = 0;           // Start from left edge
+    REG_BG2Y = 0;           // Start from top edge
+
     game_init();
     while (1) {
         update_input();
