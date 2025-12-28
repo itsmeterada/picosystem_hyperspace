@@ -2054,7 +2054,7 @@ static void game_draw(void) {
         clip_reset();
     } else if (cur_mode != 1) {
         print_3d("HYPERSPACE", 1, 1);
-        print_3d("PicoSystem Port", 1, 8);
+        print_3d("PicoSystem Port by itsmeterada", 1, 8);
         if (cur_mode == 0) {
             print_3d("PRESS X TO START", 30, 95);
             if (score > 0) {
