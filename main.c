@@ -432,7 +432,7 @@ static void dset(int n, int32_t v) {
 }
 
 static void sfx(int n, int channel) {
-    // Sound effects not implemented on PicoSystem (yet)
+    picosystem_sfx(n, channel);
 }
 
 static fix16_t sym_random_fix(fix16_t f) {
@@ -2161,6 +2161,7 @@ int main()
 {
     // Initialize PicoSystem
     picosystem_init();
+    picosystem_audio_init();  // Initialize audio system
     stdio_init_all();
 
     printf("Hyperspace for PicoSystem\r\n");
@@ -2204,6 +2205,9 @@ int main()
             // Update and render
             game_update();
             game_draw();
+
+            // Update audio system
+            picosystem_audio_update();
 
             // Flip to screen
             flip_screen();

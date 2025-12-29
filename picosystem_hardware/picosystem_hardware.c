@@ -4,8 +4,10 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "picosystem_hardware.h"
+#include "hardware/timer.h"
 
 
 #ifdef PIXEL_DOUBLE
@@ -441,3 +443,310 @@ void picosystem_init()
 void picosystem_update(uint32_t tick);
 
 void picosystem_draw(uint32_t tick);
+
+// =============================================================================
+// Audio System (PICO-8 Compatible)
+// =============================================================================
+
+#define AUDIO_SAMPLE_RATE 22050
+#define AUDIO_PWM_WRAP    255
+#define AUDIO_NUM_CHANNELS 4
+
+// PICO-8 frequency table (C-0 to D#-5, 64 notes)
+static const uint16_t p8_freq_table[64] = {
+    65, 69, 73, 78, 82, 87, 92, 98,
+    104, 110, 117, 123, 131, 139, 147, 156,
+    165, 175, 185, 196, 208, 220, 233, 247,
+    262, 277, 294, 311, 330, 349, 370, 392,
+    415, 440, 466, 494, 523, 554, 587, 622,
+    659, 698, 740, 784, 831, 880, 932, 988,
+    1047, 1109, 1175, 1245, 1319, 1397, 1480, 1568,
+    1661, 1760, 1865, 1976, 2093, 2217, 2349, 2489
+};
+
+// PICO-8 SFX data for Hyperspace
+typedef struct {
+    uint8_t speed;
+    uint8_t loop_start;
+    uint8_t loop_end;
+    uint8_t notes[32][4];  // pitch, waveform, volume, effect
+} P8SFX;
+
+static const P8SFX hyperspace_sfx[] = {
+    // SFX 0: Laser fire (descending saw wave)
+    {1, 0, 13, {
+        {50, 2, 3, 0}, {51, 2, 3, 0}, {51, 2, 3, 0}, {49, 2, 1, 0},
+        {46, 2, 3, 0}, {41, 2, 3, 0}, {36, 2, 4, 0}, {34, 2, 3, 0},
+        {32, 2, 3, 0}, {29, 2, 3, 0}, {28, 2, 3, 0}, {28, 2, 2, 0},
+        {28, 2, 1, 0}, {28, 2, 0, 0}, {28, 0, 0, 0}, {0, 0, 0, 0},
+        {50, 4, 0, 0}, {52, 4, 0, 0}, {52, 4, 0, 0}, {49, 4, 0, 0},
+        {46, 4, 0, 0}, {41, 4, 0, 0}, {36, 4, 0, 0}, {34, 4, 0, 0},
+        {32, 4, 0, 0}, {29, 4, 0, 0}, {28, 4, 0, 0}, {28, 4, 0, 0},
+        {28, 4, 0, 0}, {1, 4, 0, 0}, {1, 4, 0, 0}, {1, 4, 0, 0}
+    }},
+    // SFX 1: Player damage / barrel roll
+    {5, 0, 0, {
+        {36, 6, 7, 0}, {36, 6, 7, 0}, {39, 6, 7, 0}, {42, 6, 7, 0},
+        {49, 6, 7, 0}, {56, 6, 7, 0}, {63, 6, 7, 0}, {63, 6, 7, 0},
+        {48, 6, 7, 0}, {41, 6, 7, 0}, {36, 6, 7, 0}, {32, 6, 7, 0},
+        {30, 6, 6, 0}, {28, 6, 6, 0}, {27, 6, 5, 0}, {26, 6, 5, 0},
+        {25, 6, 4, 0}, {25, 6, 4, 0}, {24, 6, 3, 0}, {25, 6, 3, 0},
+        {26, 6, 2, 0}, {28, 6, 2, 0}, {32, 6, 1, 0}, {35, 6, 1, 0},
+        {10, 6, 0, 0}, {11, 6, 0, 0}, {13, 6, 0, 0}, {16, 6, 0, 0},
+        {18, 6, 0, 0}, {20, 6, 0, 0}, {23, 6, 0, 0}, {24, 6, 0, 0}
+    }},
+    // SFX 2: Hit enemy / explosion
+    {3, 0, 0, {
+        {45, 6, 7, 0}, {41, 4, 7, 0}, {36, 4, 7, 0}, {25, 6, 7, 0},
+        {30, 4, 7, 0}, {32, 6, 7, 0}, {29, 6, 7, 0}, {13, 6, 7, 0},
+        {22, 6, 7, 0}, {20, 4, 7, 0}, {16, 4, 7, 0}, {15, 4, 7, 0},
+        {19, 6, 7, 0}, {11, 4, 7, 0}, {9, 4, 7, 0}, {7, 6, 6, 0},
+        {7, 4, 5, 0}, {5, 4, 4, 0}, {8, 6, 3, 0}, {2, 4, 2, 0},
+        {1, 4, 1, 0}, {12, 6, 0, 0}, {5, 6, 0, 0}, {1, 6, 0, 0},
+        {1, 6, 0, 0}, {1, 6, 0, 0}, {3, 6, 0, 0}, {1, 6, 0, 0},
+        {2, 6, 0, 0}, {1, 6, 0, 0}, {1, 6, 0, 0}, {0, 0, 0, 0}
+    }},
+    // SFX 3: (unused placeholder)
+    {1, 0, 0, {
+        {60, 3, 7, 0}, {60, 0, 7, 0}, {55, 1, 7, 0}, {57, 0, 7, 0},
+        {54, 0, 7, 0}, {51, 0, 7, 0}, {47, 1, 7, 0}, {48, 0, 7, 0},
+        {41, 0, 7, 0}, {34, 0, 7, 0}, {32, 0, 7, 0}, {27, 0, 7, 0},
+        {23, 0, 7, 0}, {29, 1, 7, 0}, {20, 0, 7, 0}, {19, 0, 7, 0},
+        {18, 0, 7, 0}, {18, 0, 7, 0}, {19, 0, 7, 0}, {21, 0, 7, 0},
+        {18, 1, 7, 0}, {23, 0, 7, 0}, {18, 1, 7, 0}, {30, 0, 7, 0},
+        {39, 0, 7, 0}, {44, 0, 7, 0}, {53, 0, 7, 0}, {54, 0, 7, 0},
+        {28, 1, 7, 0}, {33, 1, 7, 0}, {46, 1, 7, 0}, {0, 0, 0, 0}
+    }},
+    // SFX 4: (unused placeholder)
+    {1, 0, 13, {
+        {44, 4, 4, 0}, {18, 0, 4, 0}, {1, 0, 2, 0}, {16, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}
+    }},
+    // SFX 5: Bonus pickup
+    {1, 0, 0, {
+        {44, 4, 7, 0}, {40, 4, 7, 0}, {35, 4, 7, 0}, {32, 4, 7, 0},
+        {28, 4, 7, 0}, {26, 4, 7, 0}, {23, 4, 6, 0}, {21, 4, 4, 0},
+        {21, 4, 2, 0}, {20, 4, 0, 0}, {22, 4, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}
+    }},
+    // SFX 6: Boss spawn
+    {24, 0, 0, {
+        {0, 0, 0, 0}, {7, 3, 6, 0}, {20, 1, 4, 0}, {7, 3, 6, 0},
+        {20, 1, 4, 0}, {26, 3, 7, 0}, {20, 1, 4, 0}, {27, 3, 7, 0},
+        {1, 4, 4, 0}, {23, 3, 7, 0}, {23, 3, 7, 0}, {23, 3, 7, 0},
+        {23, 3, 7, 0}, {23, 3, 6, 0}, {23, 3, 5, 0}, {23, 3, 0, 0},
+        {1, 4, 0, 0}, {1, 4, 0, 0}, {23, 3, 0, 0}, {11, 4, 0, 0},
+        {23, 0, 0, 0}, {23, 0, 0, 0}, {23, 0, 0, 0}, {23, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}
+    }},
+    // SFX 7: Boss damage
+    {32, 0, 0, {
+        {13, 2, 7, 0}, {13, 2, 7, 0}, {8, 2, 7, 0}, {8, 2, 7, 0},
+        {4, 2, 7, 0}, {4, 2, 7, 0}, {1, 2, 7, 0}, {1, 2, 7, 0},
+        {1, 2, 7, 0}, {1, 2, 7, 0}, {1, 2, 7, 0}, {1, 2, 7, 0},
+        {18, 0, 0, 0}, {18, 0, 0, 0}, {18, 0, 0, 0}, {18, 0, 0, 0},
+        {19, 0, 0, 0}, {20, 0, 0, 0}, {50, 0, 2, 0}, {20, 0, 0, 0},
+        {20, 0, 0, 0}, {52, 0, 4, 0}, {68, 0, 4, 0}, {82, 0, 4, 0},
+        {118, 0, 5, 0}, {82, 0, 4, 0}, {102, 0, 4, 0}, {82, 0, 4, 0},
+        {82, 0, 4, 0}, {82, 0, 4, 0}, {1, 0, 4, 0}, {0, 0, 0, 0}
+    }}
+};
+
+#define NUM_PICOSYSTEM_SFX (sizeof(hyperspace_sfx) / sizeof(hyperspace_sfx[0]))
+
+// Audio channel state
+typedef struct {
+    const P8SFX *sfx;
+    int note_index;
+    int sample_count;
+    int samples_per_note;
+    uint32_t phase;
+    uint32_t phase_inc;
+    uint8_t volume;
+    uint8_t waveform;
+    bool active;
+    bool looping;
+} PicoAudioChannel;
+
+static PicoAudioChannel ps_audio_channels[AUDIO_NUM_CHANNELS];
+static uint8_t ps_master_volume = 255;
+static uint32_t ps_lfsr = 0xACE1;
+static uint ps_audio_pwm_slice;
+
+// For piezo buzzer: generate square wave directly at audio frequency
+// This is MUCH louder than PWM DAC approach
+
+static inline uint8_t ps_gen_noise(void) {
+    uint32_t bit = ((ps_lfsr >> 0) ^ (ps_lfsr >> 2) ^ (ps_lfsr >> 3) ^ (ps_lfsr >> 5)) & 1;
+    ps_lfsr = (ps_lfsr >> 1) | (bit << 15);
+    return (ps_lfsr & 0xFF);
+}
+
+// Update PWM frequency directly for piezo buzzer
+static void ps_update_piezo_frequency(void) {
+    // Find the highest priority active channel
+    PicoAudioChannel *active = NULL;
+    for (int ch = 0; ch < AUDIO_NUM_CHANNELS; ch++) {
+        PicoAudioChannel *c = &ps_audio_channels[ch];
+        if (c->active && c->volume > 0) {
+            if (active == NULL || c->volume > active->volume) {
+                active = c;
+            }
+        }
+    }
+
+    if (active == NULL || active->phase_inc == 0) {
+        // No sound - set to silence (50% duty = no movement)
+        pwm_set_gpio_level(PICOSYSTEM_PIN_AUDIO, 0);
+        return;
+    }
+
+    // Calculate frequency from phase increment
+    // phase_inc = (freq * 65536) / AUDIO_SAMPLE_RATE
+    // freq = phase_inc * AUDIO_SAMPLE_RATE / 65536
+    uint32_t freq = (active->phase_inc * AUDIO_SAMPLE_RATE) >> 16;
+    if (freq < 20) freq = 20;
+    if (freq > 20000) freq = 20000;
+
+    // Set PWM to generate this frequency directly
+    // PicoSystem runs at 250MHz (overclock) or 125MHz
+    #ifndef NO_OVERCLOCK
+        uint32_t clock = 250000000;
+    #else
+        uint32_t clock = 125000000;
+    #endif
+
+    // Calculate wrap value for desired frequency
+    // freq = clock / (wrap + 1) / divider
+    // Using divider = 1, wrap = clock / freq - 1
+    uint32_t wrap = clock / freq - 1;
+    if (wrap > 65535) wrap = 65535;
+    if (wrap < 100) wrap = 100;
+
+    pwm_set_wrap(ps_audio_pwm_slice, wrap);
+
+    // 50% duty cycle for maximum volume on piezo
+    // Scale by volume (0-7)
+    uint32_t level = (wrap / 2) * active->volume / 7;
+    pwm_set_gpio_level(PICOSYSTEM_PIN_AUDIO, level);
+}
+
+static struct repeating_timer ps_audio_timer;
+
+static bool ps_audio_timer_callback(struct repeating_timer *t) {
+    (void)t;
+    ps_update_piezo_frequency();
+    return true;
+}
+
+void picosystem_audio_init(void) {
+    ps_audio_pwm_slice = pwm_gpio_to_slice_num(PICOSYSTEM_PIN_AUDIO);
+
+    // Configure PWM for direct frequency generation
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 1.0f);  // No clock division
+    pwm_init(ps_audio_pwm_slice, &config, true);
+    gpio_set_function(PICOSYSTEM_PIN_AUDIO, GPIO_FUNC_PWM);
+
+    pwm_set_wrap(ps_audio_pwm_slice, 1000);
+    pwm_set_gpio_level(PICOSYSTEM_PIN_AUDIO, 0);
+
+    for (int i = 0; i < AUDIO_NUM_CHANNELS; i++) {
+        ps_audio_channels[i].active = false;
+        ps_audio_channels[i].sfx = NULL;
+    }
+
+    // Timer for note progression (60Hz is enough for note changes)
+    add_repeating_timer_ms(-16, ps_audio_timer_callback, NULL, &ps_audio_timer);
+}
+
+void picosystem_sfx(int n, int channel) {
+    if (channel < 0 || channel >= AUDIO_NUM_CHANNELS) return;
+
+    PicoAudioChannel *c = &ps_audio_channels[channel];
+
+    if (n == -1) {
+        c->active = false;
+        return;
+    }
+
+    if (n == -2) {
+        for (int i = 0; i < AUDIO_NUM_CHANNELS; i++) {
+            ps_audio_channels[i].active = false;
+        }
+        return;
+    }
+
+    if (n < 0 || n >= (int)NUM_PICOSYSTEM_SFX) return;
+
+    c->sfx = &hyperspace_sfx[n];
+    c->note_index = 0;
+    c->sample_count = 0;
+    c->phase = 0;
+
+    c->samples_per_note = c->sfx->speed * 183;
+    if (c->samples_per_note < 183) c->samples_per_note = 183;
+
+    uint8_t pitch = c->sfx->notes[0][0];
+    c->waveform = c->sfx->notes[0][1];
+    c->volume = c->sfx->notes[0][2];
+
+    if (pitch < 64 && c->volume > 0) {
+        uint16_t freq = p8_freq_table[pitch];
+        c->phase_inc = (freq * 65536) / AUDIO_SAMPLE_RATE;
+        c->active = true;
+    } else {
+        c->active = false;
+    }
+
+    c->looping = (c->sfx->loop_end > c->sfx->loop_start);
+}
+
+void picosystem_audio_update(void) {
+    for (int ch = 0; ch < AUDIO_NUM_CHANNELS; ch++) {
+        PicoAudioChannel *c = &ps_audio_channels[ch];
+        if (!c->active || !c->sfx) continue;
+
+        c->sample_count += AUDIO_SAMPLE_RATE / 60;
+
+        if (c->sample_count >= c->samples_per_note) {
+            c->sample_count = 0;
+            c->note_index++;
+
+            if (c->looping && c->note_index >= c->sfx->loop_end) {
+                c->note_index = c->sfx->loop_start;
+            } else if (c->note_index >= 32) {
+                c->active = false;
+                continue;
+            }
+
+            uint8_t pitch = c->sfx->notes[c->note_index][0];
+            c->waveform = c->sfx->notes[c->note_index][1];
+            c->volume = c->sfx->notes[c->note_index][2];
+
+            if (pitch < 64 && c->volume > 0) {
+                uint16_t freq = p8_freq_table[pitch];
+                c->phase_inc = (freq * 65536) / AUDIO_SAMPLE_RATE;
+            } else if (c->volume == 0) {
+                c->phase_inc = 0;
+            } else {
+                c->active = false;
+            }
+        }
+    }
+}
+
+void picosystem_set_volume(uint8_t volume) {
+    ps_master_volume = volume;
+}

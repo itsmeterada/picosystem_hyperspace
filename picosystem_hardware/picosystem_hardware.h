@@ -85,7 +85,12 @@ void picosystem_init();
 // void picosystem_draw(uint32_t tick);
 void picosystem_backlight(uint8_t brightness);
 void picosystem_led(uint8_t r, uint8_t g, uint8_t b);
-// void picosystem_audio(uint8_t left, uint8_t right);
+
+// Audio System (PICO-8 Compatible)
+void picosystem_audio_init(void);
+void picosystem_sfx(int n, int channel);
+void picosystem_audio_update(void);
+void picosystem_set_volume(uint8_t volume);
 
 color_t picosystem_rgb(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 void picosystem_clear(color_t c);
