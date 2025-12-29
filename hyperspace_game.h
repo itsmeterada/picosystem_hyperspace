@@ -1,244 +1,21 @@
 /*
- * Hyperspace - PicoSystem Port
- * Original game by J-Fry for PICO-8
- * SDL2 port and PicoSystem port by itsmeterada
- * Uses libfixmath for fixed-point arithmetic
+ * Hyperspace Game Logic
+ * Shared between PicoSystem and ThumbyColor ports
+ *
+ * This file expects the following to be defined before inclusion:
+ * - SCREEN_WIDTH, SCREEN_HEIGHT
+ * - FIX_SCREEN_CENTER, FIX_PROJ_CONST
+ * - screen[][], spritesheet[][], map_memory[], palette_map[]
+ * - cls(), pset(), pget(), sget(), line(), rectfill(), circfill()
+ * - spr(), pal(), pal_reset(), clip_set(), clip_reset(), color()
+ * - btn(), btnp(), dget(), dset(), sfx()
+ * - rnd_state, cart_data_dirty
+ * - PSET_FAST(), SGET_FAST() macros
+ * - libfixmath functions
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
-
-#include "pico/stdlib.h"
-#include "hardware/flash.h"
-#include "hardware/sync.h"
-#include "picosystem_hardware.h"
-#include "libfixmath/fixmath.h"
-
-// Flash storage for persistent data (use last sector of flash)
-// RP2040 has 2MB flash, sector size is 4KB
-#define FLASH_TARGET_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
-#define FLASH_MAGIC 0x48595045  // "HYPE" in hex
-
-extern struct picosystem_hw pshw;
-
-// Screen dimensions (PicoSystem uses 120x120 with pixel doubling)
-#define SCREEN_WIDTH 120
-#define SCREEN_HEIGHT 120
-
-// Pico-8 color palette for PicoSystem
-// Format: ggggbbbbaaaarrrr (picosystem_rgb returns (r) | (a<<4) | (b<<8) | (g<<12))
-// Using picosystem_rgb(r, g, b, a) format where each component is 0-15
-// Original PICO-8 colors (8-bit RGB values):
-//  0: #000000 black       1: #1D2B53 dark blue    2: #7E2553 dark purple  3: #008751 dark green
-//  4: #AB5236 brown       5: #5F574F dark gray    6: #C2C3C7 light gray   7: #FFF1E8 white
-//  8: #FF004D red         9: #FFA300 orange      10: #FFEC27 yellow      11: #00E436 green
-// 12: #29ADFF blue       13: #83769C indigo     14: #FF77A8 pink        15: #FFCCAA peach
-
-// Macro to create color: picosystem format is (r & 0xf) | ((a & 0xf) << 4) | ((b & 0xf) << 8) | ((g & 0xf) << 12)
-// So it's actually: rrrr aaaa bbbb gggg in memory order (little endian: ggggbbbbaaaarrrr)
-#define PS_RGB(r, g, b) ((((r) >> 4) & 0xf) | (0xf << 4) | ((((b) >> 4) & 0xf) << 8) | ((((g) >> 4) & 0xf) << 12))
-
-static const color_t PICO8_PALETTE[16] = {
-    PS_RGB(0x00, 0x00, 0x00), //  0: black        #000000
-    PS_RGB(0x1D, 0x2B, 0x53), //  1: dark blue    #1D2B53
-    PS_RGB(0x7E, 0x25, 0x53), //  2: dark purple  #7E2553
-    PS_RGB(0x00, 0x87, 0x51), //  3: dark green   #008751
-    PS_RGB(0xAB, 0x52, 0x36), //  4: brown        #AB5236
-    PS_RGB(0x5F, 0x57, 0x4F), //  5: dark gray    #5F574F
-    PS_RGB(0xC2, 0xC3, 0xC7), //  6: light gray   #C2C3C7
-    PS_RGB(0xFF, 0xF1, 0xE8), //  7: white        #FFF1E8
-    PS_RGB(0xFF, 0x00, 0x4D), //  8: red          #FF004D
-    PS_RGB(0xFF, 0xA3, 0x00), //  9: orange       #FFA300
-    PS_RGB(0xFF, 0xEC, 0x27), // 10: yellow       #FFEC27
-    PS_RGB(0x00, 0xE4, 0x36), // 11: green        #00E436
-    PS_RGB(0x29, 0xAD, 0xFF), // 12: blue         #29ADFF
-    PS_RGB(0x83, 0x76, 0x9C), // 13: indigo       #83769C
-    PS_RGB(0xFF, 0x77, 0xA8), // 14: pink         #FF77A8
-    PS_RGB(0xFF, 0xCC, 0xAA), // 15: peach        #FFCCAA
-};
-
-// Virtual screen buffer (120x120)
-static uint8_t screen[SCREEN_HEIGHT][SCREEN_WIDTH];
-
-// Sprite sheet (128x128 pixels)
-static uint8_t spritesheet[128][128];
-
-// Map memory (for mesh data)
-static uint8_t map_memory[0x1000];
-
-// Palette mapping for pal()
-static uint8_t palette_map[16];
-
-// Drawing color
-static uint8_t draw_color = 7;
-
-// Clip region
-static int clip_x1 = 0, clip_y1 = 0, clip_x2 = SCREEN_WIDTH - 1, clip_y2 = SCREEN_HEIGHT - 1;
-
-// Random seed
-static uint32_t rnd_state = 1;
-
-// Button states
-static bool btn_state[6] = {false};
-static bool btn_prev[6] = {false};
-
-// Cart data (persistent storage)
-static int32_t cart_data[64] = {0};
-static bool cart_data_dirty = false;
-
-// Flash storage structure
-typedef struct {
-    uint32_t magic;
-    int32_t data[64];
-} FlashSaveData;
-
-static void load_cart_data(void) {
-    const FlashSaveData* flash_data = (const FlashSaveData*)(XIP_BASE + FLASH_TARGET_OFFSET);
-    if (flash_data->magic == FLASH_MAGIC) {
-        memcpy(cart_data, flash_data->data, sizeof(cart_data));
-    }
-}
-
-static void save_cart_data(void) {
-    if (!cart_data_dirty) return;
-
-    FlashSaveData save_data;
-    save_data.magic = FLASH_MAGIC;
-    memcpy(save_data.data, cart_data, sizeof(cart_data));
-
-    // Pad to 256 bytes (minimum write size)
-    uint8_t buffer[256] __attribute__((aligned(4)));
-    memset(buffer, 0xFF, sizeof(buffer));
-    memcpy(buffer, &save_data, sizeof(save_data));
-
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(FLASH_TARGET_OFFSET, buffer, sizeof(buffer));
-    restore_interrupts(ints);
-
-    cart_data_dirty = false;
-}
-
-// Fixed-point constants
-#define FIX_HALF F16(0.5)
-#define FIX_TWO F16(2.0)
-#define FIX_PI fix16_pi
-#define FIX_TWO_PI F16(6.28318530718)
-#define FIX_SCREEN_CENTER F16(60.0)  // 120/2 for PicoSystem
-#define FIX_PROJ_CONST F16(-75.0)    // Adjusted for 120px screen (was -80 for 128px)
-
-// ============================================================================
-// Pico-8 API Implementation
-// ============================================================================
-
-static void cls(void) {
-    memset(screen, 0, sizeof(screen));
-}
-
-static void pset(int x, int y, int c) {
-    if (x >= clip_x1 && x <= clip_x2 && y >= clip_y1 && y <= clip_y2 &&
-        x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-        screen[y][x] = palette_map[c & 15];
-    }
-}
-
-// Fast pset - no clipping, no bounds check (for rasterizer inner loop)
-// Still uses palette_map for palette animation to work
-#define PSET_FAST(x, y, c) (screen[(y)][(x)] = palette_map[(c) & 15])
-
-static uint8_t pget(int x, int y) {
-    if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-        return screen[y][x];
-    }
-    return 0;
-}
-
-static uint8_t sget(int x, int y) {
-    if (x >= 0 && x < 128 && y >= 0 && y < 128) {
-        return spritesheet[y][x];
-    }
-    return 0;
-}
-
-// Fast texture fetch - no bounds checking (caller must ensure valid coords)
-#define SGET_FAST(x, y) (spritesheet[(y)][(x)])
-
-static void line(int x0, int y0, int x1, int y1, int c) {
-    int dx = abs(x1 - x0);
-    int dy = abs(y1 - y0);
-    int sx = x0 < x1 ? 1 : -1;
-    int sy = y0 < y1 ? 1 : -1;
-    int err = dx - dy;
-
-    while (1) {
-        pset(x0, y0, c);
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 < dx) { err += dx; y0 += sy; }
-    }
-}
-
-static void rectfill(int x0, int y0, int x1, int y1, int c) {
-    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-    for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
-            pset(x, y, c);
-        }
-    }
-}
-
-static void circfill(int cx, int cy, int r, int c) {
-    for (int y = -r; y <= r; y++) {
-        for (int x = -r; x <= r; x++) {
-            if (x*x + y*y <= r*r) {
-                pset(cx + x, cy + y, c);
-            }
-        }
-    }
-}
-
-static void spr(int n, int x, int y, int w, int h) {
-    int sx = (n & 15) * 8;  // bitmask instead of modulo
-    int sy = (n / 16) * 8;
-    for (int py = 0; py < h * 8; py++) {
-        for (int px = 0; px < w * 8; px++) {
-            uint8_t c = sget(sx + px, sy + py);
-            if (c != 0) {
-                pset(x + px, y + py, palette_map[c]);
-            }
-        }
-    }
-}
-
-static void pal_reset(void) {
-    for (int i = 0; i < 16; i++) palette_map[i] = i;
-}
-
-static void pal(int c0, int c1) {
-    palette_map[c0 & 15] = c1 & 15;
-}
-
-static void clip_set(int x, int y, int w, int h) {
-    clip_x1 = x;
-    clip_y1 = y;
-    clip_x2 = x + w - 1;
-    clip_y2 = y + h - 1;
-}
-
-static void clip_reset(void) {
-    clip_x1 = 0;
-    clip_y1 = 0;
-    clip_x2 = SCREEN_WIDTH - 1;
-    clip_y2 = SCREEN_HEIGHT - 1;
-}
-
-static void color(int c) {
-    draw_color = c & 15;
-}
+#ifndef HYPERSPACE_GAME_H
+#define HYPERSPACE_GAME_H
 
 // PICO-8 compatible 3x5 font
 static const uint8_t font_data[96][5] = {
@@ -431,13 +208,20 @@ static void dset(int n, int32_t v) {
     }
 }
 
-// Forward declaration for sound toggle
-static int sound_enabled;
-
+// Platform-specific sfx implementation
+// Define PLATFORM_SFX before including this header to use custom implementation
+#ifdef PLATFORM_SFX
+extern void platform_sfx(int n, int channel);
 static void sfx(int n, int channel) {
-    if (!sound_enabled) return;
-    picosystem_sfx(n, channel);
+    platform_sfx(n, channel);
 }
+#else
+static void sfx(int n, int channel) {
+    // Sound effects not implemented on this platform
+    (void)n;
+    (void)channel;
+}
+#endif
 
 static fix16_t sym_random_fix(fix16_t f) {
     return f - rnd_fix(fix16_mul(f, FIX_TWO));
@@ -607,7 +391,6 @@ static fix16_t cur_thrust = 0;
 static fix16_t fade_ratio = F16(-1.0);
 static int manual_fire = 1;  // Default to MANUAL mode (AUTO off)
 static int non_inverted_y = 0;
-static int sound_enabled = 1;  // Sound on by default for PicoSystem
 static fix16_t cur_laser_t = 0;
 static int cur_laser_side = -1;
 static fix16_t cur_nme_t = 0;
@@ -1630,8 +1413,6 @@ static void game_update(void) {
             cur_mode = 3;
             manual_fire = dget(1);
             non_inverted_y = dget(2);
-            sound_enabled = dget(3);
-            if (sound_enabled == 0 && dget(3) == 0) sound_enabled = 1;  // Default to on if not set
         }
     } else if (cur_mode == 3) {
         cam_angle_z -= F16(0.00175);
@@ -1643,10 +1424,6 @@ static void game_update(void) {
         if (btnp(2) || btnp(3)) {
             non_inverted_y = 1 - non_inverted_y;
             dset(2, non_inverted_y);
-        }
-        if (btnp(4)) {
-            sound_enabled = 1 - sound_enabled;
-            dset(3, sound_enabled);
         }
 
         if (btnp(5)) {
@@ -1895,6 +1672,13 @@ static void set_ngn_pal(void) {
     pal(15, laser_ngn_colors[(index + 2) & 3]);
 }
 
+static void draw_single_flare(int index, fix16_t factor, fix16_t vx, fix16_t vy, int offset) {
+    int px = flr_fix(FIX_SCREEN_CENTER - F16(4.0) + fix16_mul(vx, factor));
+    int py = flr_fix(FIX_SCREEN_CENTER - F16(4.0) + fix16_mul(vy, factor));
+    int cur_offset = ((flare_offset + px + py + offset) & 0x1) * 4;
+    spr(index + cur_offset, px, py, 1, 1);
+}
+
 static void draw_lens_flare(void) {
     int sx = fix16_to_int(star_proj.x);
     int sy = fix16_to_int(star_proj.y);
@@ -1904,13 +1688,11 @@ static void draw_lens_flare(void) {
     fix16_t vx = FIX_SCREEN_CENTER - star_proj.x;
     fix16_t vy = FIX_SCREEN_CENTER - star_proj.y;
 
-    fix16_t factors[] = {F16(-0.3), F16(0.4), F16(0.5), F16(0.9), F16(1.0)};
-
-    for (int i = 0; i < 5; i++) {
-        int px = fix16_to_int(F16(56.0) + fix16_mul(vx, factors[i]));  // Adjusted for 120px
-        int py = fix16_to_int(F16(56.0) + fix16_mul(vy, factors[i]));
-        spr(40 + (i % 4), px, py, 1, 1);
-    }
+    draw_single_flare(40, F16(-0.3), vx, vy, 0);
+    draw_single_flare(59, F16(0.4), vx, vy, 1);
+    draw_single_flare(56, F16(0.5), vx, vy, 0);
+    draw_single_flare(42, F16(0.9), vx, vy, 1);
+    draw_single_flare(43, F16(1.0), vx, vy, 0);
 
     flare_offset = 1 - flare_offset;
 }
@@ -2084,12 +1866,11 @@ static void game_draw(void) {
             print_3d(buf, 1, 112);
         } else {
             print_3d("PRESS X TO START", 30, 50);
-            print_3d("ARROWS:OPT A:SND", 22, 60);
-            const char* option_str[] = {"AUTO", "MANUAL", "INV Y", "NORM Y", "SND OFF", "SND ON"};
-            spr(99, 1, 98, 1, 2);
-            print_3d(option_str[manual_fire], 9, 98);
-            print_3d(option_str[non_inverted_y + 2], 9, 105);
-            print_3d(option_str[sound_enabled + 4], 9, 112);
+            print_3d("ARROWS:OPT", 30, 60);
+            const char* option_str[] = {"AUTO", "MANUAL", "INV Y", "NORM Y"};
+            spr(99, 1, 105, 1, 2);
+            print_3d(option_str[manual_fire], 9, 105);
+            print_3d(option_str[non_inverted_y + 2], 9, 112);
         }
     }
 
@@ -2118,32 +1899,14 @@ static void load_embedded_data(void) {
 }
 
 // ============================================================================
-// Input Handling
-// ============================================================================
-
-static void update_input(void) {
-    memcpy(btn_prev, btn_state, sizeof(btn_prev));
-
-    uint32_t io = pshw.io;
-    uint32_t lio = pshw.lio;
-
-    // Map PicoSystem buttons to PICO-8 style
-    btn_state[0] = !(io & (1 << PICOSYSTEM_INPUT_LEFT));   // Left
-    btn_state[1] = !(io & (1 << PICOSYSTEM_INPUT_RIGHT));  // Right
-    btn_state[2] = !(io & (1 << PICOSYSTEM_INPUT_UP));     // Up
-    btn_state[3] = !(io & (1 << PICOSYSTEM_INPUT_DOWN));   // Down
-    // A and B both fire, X and Y both do barrel roll
-    btn_state[4] = !(io & (1 << PICOSYSTEM_INPUT_A)) || !(io & (1 << PICOSYSTEM_INPUT_B));  // A/B = fire
-    btn_state[5] = !(io & (1 << PICOSYSTEM_INPUT_X)) || !(io & (1 << PICOSYSTEM_INPUT_Y));  // X/Y = barrel roll
-}
-
-// ============================================================================
 // Main
 // ============================================================================
 
+// Note: update_buttons() should be implemented by the platform
+// Note: Platform should set rnd_state before calling game_init()
+
 static void game_init(void) {
     pal_reset();
-    rnd_state = picosystem_time();
 
     // Load persistent data from flash
     load_cart_data();
@@ -2155,78 +1918,4 @@ static void game_init(void) {
     init_bg();
 }
 
-static void flip_screen(void) {
-    // Convert screen buffer to PicoSystem framebuffer
-    buffer_t* fb = pshw.screen;
-    if (!fb || !fb->data) return;
-
-    for (int y = 0; y < SCREEN_HEIGHT; y++) {
-        for (int x = 0; x < SCREEN_WIDTH; x++) {
-            fb->data[y * SCREEN_WIDTH + x] = PICO8_PALETTE[screen[y][x] & 15];
-        }
-    }
-
-    picosystem_flip();
-}
-
-int main()
-{
-    // Initialize PicoSystem
-    picosystem_init();
-    picosystem_audio_init();  // Initialize audio system
-    stdio_init_all();
-
-    printf("Hyperspace for PicoSystem\r\n");
-
-    // Keep the screen off during init
-    picosystem_backlight(0);
-    picosystem_flip();
-    while(picosystem_is_flipping()) { sleep_ms(1); }
-    picosystem_wait_vsync();
-    picosystem_wait_vsync();
-
-    // Load sprite and map data
-    load_embedded_data();
-
-    // Initialize game
-    game_init();
-
-    // Turn on backlight
-    picosystem_backlight(75);
-
-    pshw.io = picosystem_gpio_get();
-
-    uint32_t last_frame_time = picosystem_time();
-    const uint32_t frame_duration = 33;  // ~30 FPS
-
-    // Main game loop
-    while (true) {
-        uint32_t current_time = picosystem_time();
-
-        if (current_time - last_frame_time >= frame_duration) {
-            last_frame_time = current_time;
-
-            // Update input
-            pshw.lio = pshw.io;
-            pshw.io = picosystem_gpio_get();
-            update_input();
-
-            // Wait for previous flip to complete
-            while(picosystem_is_flipping()) {}
-
-            // Update and render
-            game_update();
-            game_draw();
-
-            // Update audio system
-            picosystem_audio_update();
-
-            // Flip to screen
-            flip_screen();
-        }
-
-        sleep_ms(1);
-    }
-
-    return 0;
-}
+#endif // HYPERSPACE_GAME_H
