@@ -1719,7 +1719,7 @@ static void draw_lens_flare(void) {
 
     fix16_t factors[] = {F16(-0.3), F16(0.4), F16(0.5), F16(0.9), F16(1.0)};
     // Sprite indices for each flare element (swapped 0 and 1 to match original)
-    int sprite_map[] = {1, 0, 2, 2, 3};
+    int sprite_map[] = {1, 0, 2, 3, 2};
 
     // Use flare_offset to alternate between sprite sets 40-43 and 44-47
     int base_sprite = 40 + flare_offset * 4;

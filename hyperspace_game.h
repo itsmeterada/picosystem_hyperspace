@@ -208,11 +208,15 @@ static void dset(int n, int32_t v) {
     }
 }
 
+// Sound enable flag (must be declared before sfx())
+static int sound_enabled = 1;  // Sound on by default
+
 // Platform-specific sfx implementation
 // Define PLATFORM_SFX before including this header to use custom implementation
 #ifdef PLATFORM_SFX
 extern void platform_sfx(int n, int channel);
 static void sfx(int n, int channel) {
+    if (!sound_enabled) return;
     platform_sfx(n, channel);
 }
 #else
@@ -1413,6 +1417,8 @@ static void game_update(void) {
             cur_mode = 3;
             manual_fire = dget(1);
             non_inverted_y = dget(2);
+            sound_enabled = dget(3);
+            if (sound_enabled == 0 && dget(3) == 0) sound_enabled = 1;
         }
     } else if (cur_mode == 3) {
         cam_angle_z -= F16(0.00175);
@@ -1424,6 +1430,10 @@ static void game_update(void) {
         if (btnp(2) || btnp(3)) {
             non_inverted_y = 1 - non_inverted_y;
             dset(2, non_inverted_y);
+        }
+        if (btnp(4)) {
+            sound_enabled = 1 - sound_enabled;
+            dset(3, sound_enabled);
         }
 
         if (btnp(5)) {
@@ -1672,13 +1682,6 @@ static void set_ngn_pal(void) {
     pal(15, laser_ngn_colors[(index + 2) & 3]);
 }
 
-static void draw_single_flare(int index, fix16_t factor, fix16_t vx, fix16_t vy, int offset) {
-    int px = flr_fix(FIX_SCREEN_CENTER - F16(4.0) + fix16_mul(vx, factor));
-    int py = flr_fix(FIX_SCREEN_CENTER - F16(4.0) + fix16_mul(vy, factor));
-    int cur_offset = ((flare_offset + px + py + offset) & 0x1) * 4;
-    spr(index + cur_offset, px, py, 1, 1);
-}
-
 static void draw_lens_flare(void) {
     int sx = fix16_to_int(star_proj.x);
     int sy = fix16_to_int(star_proj.y);
@@ -1688,11 +1691,19 @@ static void draw_lens_flare(void) {
     fix16_t vx = FIX_SCREEN_CENTER - star_proj.x;
     fix16_t vy = FIX_SCREEN_CENTER - star_proj.y;
 
-    draw_single_flare(40, F16(-0.3), vx, vy, 0);
-    draw_single_flare(59, F16(0.4), vx, vy, 1);
-    draw_single_flare(56, F16(0.5), vx, vy, 0);
-    draw_single_flare(42, F16(0.9), vx, vy, 1);
-    draw_single_flare(43, F16(1.0), vx, vy, 0);
+    fix16_t factors[] = {F16(-0.3), F16(0.4), F16(0.5), F16(0.9), F16(1.0)};
+    // Sprite indices for each flare element (swapped 0 and 1 to match original)
+    int sprite_map[] = {1, 0, 2, 3, 2};
+
+    // Use flare_offset to alternate between sprite sets 40-43 and 44-47
+    int base_sprite = 40 + flare_offset * 4;
+
+    for (int i = 0; i < 5; i++) {
+        int px = fix16_to_int(FIX_SCREEN_CENTER + fix16_mul(vx, factors[i]));
+        int py = fix16_to_int(FIX_SCREEN_CENTER + fix16_mul(vy, factors[i]));
+        // Center the 8x8 sprite by offsetting -4
+        spr(base_sprite + sprite_map[i], px - 4, py - 4, 1, 1);
+    }
 
     flare_offset = 1 - flare_offset;
 }
@@ -1852,7 +1863,7 @@ static void game_draw(void) {
         spr(0, 59, 1, 8, 1);
         clip_reset();
     } else if (cur_mode != 1) {
-        print_3d("HYPERSPACE", 1, 1);
+        print_3d("HYPERSPACE by J-Fry", 1, 1);
         print_3d("PicoSystem Port by itsmeterada", 1, 8);
         if (cur_mode == 0) {
             print_3d("PRESS X TO START", 30, 95);
@@ -1867,10 +1878,11 @@ static void game_draw(void) {
         } else {
             print_3d("PRESS X TO START", 30, 50);
             print_3d("ARROWS:OPT", 30, 60);
-            const char* option_str[] = {"AUTO", "MANUAL", "INV Y", "NORM Y"};
-            spr(99, 1, 105, 1, 2);
-            print_3d(option_str[manual_fire], 9, 105);
-            print_3d(option_str[non_inverted_y + 2], 9, 112);
+            const char* option_str[] = {"AUTO", "MANUAL", "INV Y", "NORM Y", "SND OFF", "SND ON"};
+            spr(99, 1, 98, 1, 2);
+            print_3d(option_str[manual_fire], 9, 98);
+            print_3d(option_str[non_inverted_y + 2], 9, 105);
+            print_3d(option_str[sound_enabled + 4], 9, 112);
         }
     }
 

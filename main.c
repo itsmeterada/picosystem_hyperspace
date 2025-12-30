@@ -1906,7 +1906,7 @@ static void draw_lens_flare(void) {
 
     fix16_t factors[] = {F16(-0.3), F16(0.4), F16(0.5), F16(0.9), F16(1.0)};
     // Sprite indices for each flare element (swapped 0 and 1 to match original)
-    int sprite_map[] = {1, 0, 2, 2, 3};
+    int sprite_map[] = {1, 0, 2, 3, 2};
 
     // Use flare_offset to alternate between sprite sets 40-43 and 44-47
     int base_sprite = 40 + flare_offset * 4;
@@ -2076,7 +2076,7 @@ static void game_draw(void) {
         spr(0, 59, 1, 8, 1);
         clip_reset();
     } else if (cur_mode != 1) {
-        print_3d("HYPERSPACE", 1, 1);
+        print_3d("HYPERSPACE by J-Fry", 1, 1);
         print_3d("PicoSystem Port by itsmeterada", 1, 8);
         if (cur_mode == 0) {
             print_3d("PRESS X TO START", 30, 95);
