@@ -96,7 +96,9 @@ static uint32_t rnd_state = 1;
 // Button states
 static bool btn_state[6] = {false};
 static bool btn_prev[6] = {false};
+#ifdef DEBUG_BUILD
 static bool btn_y_held = false;  // Y button for palette display
+#endif
 
 // Cart data (persistent storage)
 static int32_t cart_data[64] = {0};
@@ -283,10 +285,13 @@ static void update_input(void) {
     btn_state[4] = !(io & (1 << PICOSYSTEM_INPUT_A)) || !(io & (1 << PICOSYSTEM_INPUT_B));  // A/B = fire
     btn_state[5] = !(io & (1 << PICOSYSTEM_INPUT_X)) || !(io & (1 << PICOSYSTEM_INPUT_Y));  // X/Y = barrel roll
 
+#ifdef DEBUG_BUILD
     // Y button alone for palette display
     btn_y_held = !(io & (1 << PICOSYSTEM_INPUT_Y));
+#endif
 }
 
+#ifdef DEBUG_BUILD
 // ============================================================================
 // Palette Display (for PICO-8 color comparison)
 // ============================================================================
@@ -321,6 +326,7 @@ static void draw_palette_display(void) {
         }
     }
 }
+#endif
 
 // ============================================================================
 // Screen Flip
@@ -391,10 +397,13 @@ int main()
             while(picosystem_is_flipping()) {}
 
             // Update and render
+#ifdef DEBUG_BUILD
             if (btn_y_held) {
                 // Show palette display when Y is held
                 draw_palette_display();
-            } else {
+            } else
+#endif
+            {
                 game_update();
                 game_draw();
             }

@@ -12,6 +12,9 @@ project(hyperspace C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Debug build option (enables palette display with Y button)
+option(DEBUG_BUILD "Enable debug features" OFF)
+
 # libfixmath source files
 set(LIBFIXMATH_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/libfixmath/fix16.c
@@ -80,6 +83,11 @@ target_link_libraries(${PROJECT_NAME} libfixmath)
 
 # Include directories for the main executable
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+
+# Add DEBUG_BUILD define if enabled
+if(DEBUG_BUILD)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DEBUG_BUILD)
+endif()
 
 
 
