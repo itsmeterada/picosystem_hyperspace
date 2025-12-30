@@ -46,27 +46,26 @@ extern struct picosystem_hw pshw;
 // Pico-8 Color Palette for PicoSystem
 // ============================================================================
 
-// Format: ggggbbbbaaaarrrr (picosystem_rgb returns (r) | (a<<4) | (b<<8) | (g<<12))
-// Macro to create color: picosystem format is (r & 0xf) | ((a & 0xf) << 4) | ((b & 0xf) << 8) | ((g & 0xf) << 12)
-#define PS_RGB(r, g, b) ((((r) >> 4) & 0xf) | (0xf << 4) | ((((b) >> 4) & 0xf) << 8) | ((((g) >> 4) & 0xf) << 12))
-
+// Format: ggggbbbbaaaarrrr
+// Pre-calculated using (value * 15 + 127) / 255 for accurate 8-bit to 4-bit conversion
+// This provides proper rounding instead of truncation (>> 4)
 static const color_t PICO8_PALETTE[16] = {
-    PS_RGB(0x00, 0x00, 0x00), //  0: black        #000000
-    PS_RGB(0x1D, 0x2B, 0x53), //  1: dark blue    #1D2B53
-    PS_RGB(0x7E, 0x25, 0x53), //  2: dark purple  #7E2553
-    PS_RGB(0x00, 0x87, 0x51), //  3: dark green   #008751
-    PS_RGB(0xAB, 0x52, 0x36), //  4: brown        #AB5236
-    PS_RGB(0x5F, 0x57, 0x4F), //  5: dark gray    #5F574F
-    PS_RGB(0xC2, 0xC3, 0xC7), //  6: light gray   #C2C3C7
-    PS_RGB(0xFF, 0xF1, 0xE8), //  7: white        #FFF1E8
-    PS_RGB(0xFF, 0x00, 0x4D), //  8: red          #FF004D
-    PS_RGB(0xFF, 0xA3, 0x00), //  9: orange       #FFA300
-    PS_RGB(0xFF, 0xEC, 0x27), // 10: yellow       #FFEC27
-    PS_RGB(0x00, 0xE4, 0x36), // 11: green        #00E436
-    PS_RGB(0x29, 0xAD, 0xFF), // 12: blue         #29ADFF
-    PS_RGB(0x83, 0x76, 0x9C), // 13: indigo       #83769C
-    PS_RGB(0xFF, 0x77, 0xA8), // 14: pink         #FF77A8
-    PS_RGB(0xFF, 0xCC, 0xAA), // 15: peach        #FFCCAA
+    0x00F0,  //  0: black        #000000 → ( 0,  0,  0)
+    0x35F2,  //  1: dark blue    #1D2B53 → ( 2,  3,  5)
+    0x25F7,  //  2: dark purple  #7E2553 → ( 7,  2,  5)
+    0x85F0,  //  3: dark green   #008751 → ( 0,  8,  5)
+    0x53FA,  //  4: brown        #AB5236 → (10,  5,  3)
+    0x55F6,  //  5: dark gray    #5F574F → ( 6,  5,  5)
+    0xBCFB,  //  6: light gray   #C2C3C7 → (11, 11, 12)
+    0xEEFF,  //  7: white        #FFF1E8 → (15, 14, 14)
+    0x05FF,  //  8: red          #FF004D → (15,  0,  5)
+    0xA0FF,  //  9: orange       #FFA300 → (15, 10,  0)
+    0xE2FF,  // 10: yellow       #FFEC27 → (15, 14,  2)
+    0xD3F0,  // 11: green        #00E436 → ( 0, 13,  3)
+    0xAFF2,  // 12: blue         #29ADFF → ( 2, 10, 15)
+    0x79F8,  // 13: indigo       #83769C → ( 8,  7,  9)
+    0x7AFF,  // 14: pink         #FF77A8 → (15,  7, 10)
+    0xCAFF,  // 15: peach        #FFCCAA → (15, 12, 10)
 };
 
 // ============================================================================
@@ -97,6 +96,7 @@ static uint32_t rnd_state = 1;
 // Button states
 static bool btn_state[6] = {false};
 static bool btn_prev[6] = {false};
+static bool btn_y_held = false;  // Y button for palette display
 
 // Cart data (persistent storage)
 static int32_t cart_data[64] = {0};
@@ -282,6 +282,44 @@ static void update_input(void) {
     // A and B both fire, X and Y both do barrel roll
     btn_state[4] = !(io & (1 << PICOSYSTEM_INPUT_A)) || !(io & (1 << PICOSYSTEM_INPUT_B));  // A/B = fire
     btn_state[5] = !(io & (1 << PICOSYSTEM_INPUT_X)) || !(io & (1 << PICOSYSTEM_INPUT_Y));  // X/Y = barrel roll
+
+    // Y button alone for palette display
+    btn_y_held = !(io & (1 << PICOSYSTEM_INPUT_Y));
+}
+
+// ============================================================================
+// Palette Display (for PICO-8 color comparison)
+// ============================================================================
+
+static void draw_palette_display(void) {
+    // 4x4 grid of 16 colors
+    // Each cell is 30x30 pixels (120/4 = 30)
+    const int cell_size = 30;
+
+    for (int i = 0; i < 16; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int x0 = col * cell_size;
+        int y0 = row * cell_size;
+
+        // Fill rectangle with color i (bypass palette_map to show true colors)
+        for (int y = y0; y < y0 + cell_size; y++) {
+            for (int x = x0; x < x0 + cell_size; x++) {
+                screen[y][x] = i;
+            }
+        }
+
+        // Draw border (color 0 or 7 for contrast)
+        int border_color = (i == 0 || i == 1 || i == 2 || i == 5) ? 7 : 0;
+        for (int x = x0; x < x0 + cell_size; x++) {
+            screen[y0][x] = border_color;
+            screen[y0 + cell_size - 1][x] = border_color;
+        }
+        for (int y = y0; y < y0 + cell_size; y++) {
+            screen[y][x0] = border_color;
+            screen[y][x0 + cell_size - 1] = border_color;
+        }
+    }
 }
 
 // ============================================================================
@@ -353,8 +391,13 @@ int main()
             while(picosystem_is_flipping()) {}
 
             // Update and render
-            game_update();
-            game_draw();
+            if (btn_y_held) {
+                // Show palette display when Y is held
+                draw_palette_display();
+            } else {
+                game_update();
+                game_draw();
+            }
 
             // Update audio system
             picosystem_audio_update();
