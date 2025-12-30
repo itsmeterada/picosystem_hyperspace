@@ -319,14 +319,12 @@ thumbycolor/
 ├── thumbycolor_hw.h      # HAL header
 ├── CMakeLists.txt        # Build configuration (ARM/RISC-V)
 ├── build.sh              # Build script
+├── hyperspace_game.h     # Shared game logic (all ports)
+├── hyperspace_data.h     # Shared sprite/mesh data
+├── libfixmath/           # Fixed-point math library
 ├── README.md             # This file
 └── build/                # Build output directory
     └── hyperspace_thumbycolor.uf2
-
-../
-├── hyperspace_game.h     # Shared game logic (all ports)
-├── hyperspace_data.h     # Shared sprite/mesh data
-└── libfixmath/           # Fixed-point math library
 ```
 
 ## Code Architecture
